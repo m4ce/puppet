@@ -21,6 +21,17 @@ describe "RDoc::Parser", :if => Puppet.features.rdoc1? do
   end
 
   describe "when scanning files" do
+    around(:each) do |example|
+      Puppet.override({
+          :current_environment => Puppet::Node::Environment.create(:doc, [], '/somewhere/etc/manifests/site.pp')
+        },
+        "A fake current environment that the application would have established by now"
+      ) do
+
+        example.run
+      end
+    end
+
     it "should parse puppet files with the puppet parser" do
       @parser.stubs(:scan_top_level)
       parser = stub 'parser'
@@ -56,11 +67,9 @@ describe "RDoc::Parser", :if => Puppet.features.rdoc1? do
 
     it "should scan the top level even if the file has already parsed" do
       known_type = stub 'known_types'
-      env = stub 'env'
-      Puppet::Node::Environment.stubs(:new).returns(env)
+      env = Puppet.lookup(:current_environment)
       env.stubs(:known_resource_types).returns(known_type)
       known_type.expects(:watching_file?).with("module/manifests/init.pp").returns(true)
-
       @parser.expects(:scan_top_level)
 
       @parser.scan
@@ -68,7 +77,7 @@ describe "RDoc::Parser", :if => Puppet.features.rdoc1? do
   end
 
   describe "when scanning top level entities" do
-    let(:environment) { Puppet::Node::Environment.create(:env, [], '') }
+    let(:environment) { Puppet::Node::Environment.create(:env, []) }
 
     before :each do
       @resource_type_collection = resource_type_collection = stub_everything('resource_type_collection')
@@ -168,7 +177,7 @@ describe "RDoc::Parser", :if => Puppet.features.rdoc1? do
   describe "when finding modules from filepath" do
     let(:environment) {
       Puppet::FileSystem.expects(:directory?).with("/path/to/modules").at_least_once.returns(true)
-      Puppet::Node::Environment.create(:env, ["/path/to/modules"], '')
+      Puppet::Node::Environment.create(:env, ["/path/to/modules"])
     }
 
     it "should return the module name for modulized puppet manifests" do

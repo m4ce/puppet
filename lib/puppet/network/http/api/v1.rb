@@ -63,7 +63,13 @@ class Puppet::Network::HTTP::API::V1
 
     method = indirection_method(http_method, indirection)
 
-    params[:environment] = Puppet.lookup(:environments).get(environment)
+    configured_environment = Puppet.lookup(:environments).get(environment)
+    if configured_environment.nil?
+      raise Puppet::Network::HTTP::Error::HTTPNotFoundError.new("Could not find environment '#{environment}'", Puppet::Network::HTTP::Issues::ENVIRONMENT_NOT_FOUND)
+    else
+      configured_environment = configured_environment.override_from_commandline(Puppet.settings)
+      params[:environment] = configured_environment
+    end
 
     params.delete(:bucket_path)
 

@@ -29,27 +29,29 @@ module Puppet::Util::Execution
     end
   end
 
-  # Executes the provided command with STDIN connected to a pipe, yielding the
-  # pipe object.
-  # This allows data to be fed to the subprocess.
-  #
   # The command can be a simple string, which is executed as-is, or an Array,
   # which is treated as a set of command arguments to pass through.
   #
-  # In all cases this is passed directly to the shell, and STDOUT and STDERR
-  # are connected together during execution.
-  # @param command [String, Array<String>] the command to execute as one string, or as parts in an array.
-  #   the parts of the array are joined with one separating space between each entry when converting to
-  #   the command line string to execute.
-  # @param failonfail [Boolean] (true) if the execution should fail with Exception on failure or not.
+  # In either case, the command is passed directly to the shell, STDOUT and
+  # STDERR are connected together, and STDOUT will be streamed to the yielded
+  # pipe.
+  #
+  # @param command [String, Array<String>] the command to execute as one string,
+  #   or as parts in an array. The parts of the array are joined with one
+  #   separating space between each entry when converting to the command line
+  #   string to execute.
+  # @param failonfail [Boolean] (true) if the execution should fail with
+  #   Exception on failure or not.
   # @yield [pipe] to a block executing a subprocess
   # @yieldparam pipe [IO] the opened pipe
   # @yieldreturn [String] the output to return
-  # @raise [Puppet::ExecutionFailure] if the executed chiled process did not exit with status == 0 and `failonfail` is
-  #   `true`.
-  # @return [String] a string with the output from the subprocess executed by the given block
-  # @api public
+  # @raise [Puppet::ExecutionFailure] if the executed chiled process did not
+  #   exit with status == 0 and `failonfail` is `true`.
+  # @return [String] a string with the output from the subprocess executed by
+  #   the given block
   #
+  # @see Kernel#open for `mode` values
+  # @api public
   def self.execpipe(command, failonfail = true)
     # Paste together an array with spaces.  We used to paste directly
     # together, no spaces, which made for odd invocations; the user had to

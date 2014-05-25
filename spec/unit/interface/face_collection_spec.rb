@@ -5,32 +5,44 @@ require 'tmpdir'
 require 'puppet/interface'
 
 describe Puppet::Interface::FaceCollection do
-  # To avoid cross-pollution we have to save and restore both the hash
-  # containing all the interface data, and the array used by require.  Restoring
-  # both means that we don't leak side-effects across the code. --daniel 2011-04-06
-  #
-  # Worse luck, we *also* need to flush $" of anything defining a face,
-  # because otherwise we can cross-pollute from other test files and end up
-  # with no faces loaded, but the require value set true. --daniel 2011-04-10
-  before :each do
-    @original_faces    = subject.instance_variable_get("@faces").dup
-    @original_required = $".dup
-    $".delete_if do |path| path =~ %r{/face/.*\.rb$} end
-    subject.instance_variable_get(:@faces).clear
-    subject.instance_variable_set(:@loaded, false)
-    @autoload_loaded = {}
-    Puppet::Util::Autoload.stubs(:loaded).returns(@autoload_loaded)
+
+  # To prevent conflicts with other specs that use faces, we must save and restore global state.
+  # Because there are specs that do 'describe Puppet::Face[...]', we must restore the same objects otherwise
+  # the 'subject' of the specs will differ.
+  before :all do
+    # Save FaceCollection's global state
+    faces = subject.instance_variable_get(:@faces)
+    @faces = faces.dup
+    faces.each do |k, v|
+      @faces[k] = v.dup
+    end
+    @faces_loaded = subject.instance_variable_get(:@loaded)
+
+    # Save the already required face files
+    @required = []
+    $".each do |path|
+      @required << path if path =~ /face\/.*\.rb$/
+    end
+
+    # Save Autoload's global state
+    @loaded = Puppet::Util::Autoload.instance_variable_get(:@loaded).dup
   end
 
-  after :each do
-    # Just pushing the duplicate back into place doesn't work as reliably as
-    # this method to restore the state.  Honestly, I need to make this horror
-    # go away entirely. --daniel 2012-04-28
-    faces = subject.instance_variable_get("@faces")
-    faces.clear
-    @original_faces.each {|k,v| faces[k] = v }
+  after :all do
+    # Restore global state
+    subject.instance_variable_set :@faces, @faces
+    subject.instance_variable_set :@loaded, @faces_loaded
+    $".delete_if { |path| path =~ /face\/.*\.rb$/ }
+    @required.each { |path| $".push path unless $".include? path }
+    Puppet::Util::Autoload.instance_variable_set(:@loaded, @loaded)
+  end
 
-    @original_required.each {|f| $".push f unless $".include? f }
+  before :each do
+    # Before each test, clear the faces
+    subject.instance_variable_get(:@faces).clear
+    subject.instance_variable_set(:@loaded, false)
+    Puppet::Util::Autoload.instance_variable_get(:@loaded).clear
+    $".delete_if { |path| path =~ /face\/.*\.rb$/ }
   end
 
   describe "::[]" do

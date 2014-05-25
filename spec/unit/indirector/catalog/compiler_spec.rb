@@ -168,7 +168,12 @@ describe Puppet::Resource::Catalog::Compiler do
     it "should convert the facts into a fact instance and save it" do
       request = a_request_that_contains(@facts)
 
-      Puppet::Node::Facts.indirection.expects(:save).with(equals(@facts))
+      options = {
+        :environment => request.environment,
+        :transaction_uuid => request.options[:transaction_uuid],
+      }
+
+      Puppet::Node::Facts.indirection.expects(:save).with(equals(@facts), nil, options)
 
       @compiler.extract_facts_from_request(request)
     end
@@ -183,6 +188,22 @@ describe Puppet::Resource::Catalog::Compiler do
       compiler.stubs(:compile)
 
       Puppet::Node.indirection.expects(:find).with("me", anything).returns(node)
+
+      compiler.find(request)
+    end
+
+    it "should pass the transaction_uuid to the node indirection" do
+      uuid = '793ff10d-89f8-4527-a645-3302cbc749f3'
+      node = Puppet::Node.new("thing")
+      compiler = Puppet::Resource::Catalog::Compiler.new
+      compiler.stubs(:compile)
+      request = Puppet::Indirector::Request.new(:catalog, :find, "thing",
+                                                nil, :transaction_uuid => uuid)
+
+      Puppet::Node.indirection.expects(:find).with(
+        "thing",
+        has_entries(:transaction_uuid => uuid)
+      ).returns(node)
 
       compiler.find(request)
     end

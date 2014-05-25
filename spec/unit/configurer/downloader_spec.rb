@@ -51,6 +51,11 @@ describe Puppet::Configurer::Downloader do
       @dler.file
     end
 
+    it "should set source_permissions to ignore" do
+      Puppet::Type.type(:file).expects(:new).with { |opts| opts[:source_permissions] == :ignore }
+      @dler.file
+    end
+
     describe "on POSIX", :as_platform => :posix do
       it "should always set the owner to the current UID" do
         Process.expects(:uid).returns 51
@@ -73,11 +78,6 @@ describe Puppet::Configurer::Downloader do
 
       it "should omit the group" do
         Puppet::Type.type(:file).expects(:new).with { |opts| opts[:group] == nil }
-        @dler.file
-      end
-
-      it "should set source_permissions to ignore" do
-        Puppet::Type.type(:file).expects(:new).with { |opts| opts[:source_permissions] == :ignore }
         @dler.file
       end
     end
@@ -129,7 +129,8 @@ describe Puppet::Configurer::Downloader do
       @dl_name = tmpfile("downloadpath")
       source_name = tmpfile("source")
       File.open(source_name, 'w') {|f| f.write('hola mundo') }
-      @dler = Puppet::Configurer::Downloader.new("foo", @dl_name, source_name)
+      env = Puppet::Node::Environment.remote('foo')
+      @dler = Puppet::Configurer::Downloader.new("foo", @dl_name, source_name, Puppet[:pluginsignore], env)
     end
 
     it "should not skip downloaded resources when filtering on tags" do

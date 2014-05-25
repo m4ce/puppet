@@ -25,6 +25,7 @@ class Puppet::Pops::Validation::Checker4_0
     @@query_visitor       ||= Puppet::Pops::Visitor.new(nil, "query", 0, 0)
     @@top_visitor         ||= Puppet::Pops::Visitor.new(nil, "top", 1, 1)
     @@relation_visitor    ||= Puppet::Pops::Visitor.new(nil, "relation", 0, 0)
+    @@idem_visitor        ||= Puppet::Pops::Visitor.new(self, "idem", 0, 0)
 
     @acceptor = diagnostics_producer
   end
@@ -75,6 +76,25 @@ class Puppet::Pops::Validation::Checker4_0
   #
   def assign(o, via_index = false)
     @@assignment_visitor.visit_this_1(self, o, via_index)
+  end
+
+  # Checks if the expression has side effect ('idem' is latin for 'the same', here meaning that the evaluation state
+  # is known to be unchanged after the expression has been evaluated). The result is not 100% authoritative for
+  # negative answers since analysis of function behavior is not possible.
+  # @return [Boolean] true if expression is known to have no effect on evaluation state
+  #
+  def idem(o)
+    @@idem_visitor.visit_this_0(self, o)
+  end
+
+  # Returns the last expression in a block, or the expression, if that expression is idem
+  def ends_with_idem(o)
+    if o.is_a?(Puppet::Pops::Model::BlockExpression)
+      last = o.statements[-1]
+      idem(last) ? last : nil
+    else
+      idem(o) ? o : nil
+    end
   end
 
   #---ASSIGNMENT CHECKS
@@ -159,9 +179,25 @@ class Puppet::Pops::Validation::Checker4_0
     rvalue(o.right_expr)
   end
 
+  def check_BlockExpression(o)
+    o.statements[0..-2].each do |statement|
+      if idem(statement)
+        acceptor.accept(Issues::IDEM_EXPRESSION_NOT_LAST, statement)
+        break # only flag the first
+      end
+    end
+  end
+
   def check_CallNamedFunctionExpression(o)
-    unless o.functor_expr.is_a? Model::QualifiedName
-      acceptor.accept(Issues::ILLEGAL_EXPRESSION, o.functor_expr, :feature => 'function name', :container => o)
+    case o.functor_expr
+    when Puppet::Pops::Model::QualifiedName
+      # ok
+      nil
+    when Puppet::Pops::Model::RenderStringExpression
+      # helpful to point out this easy to make Epp error
+      acceptor.accept(Issues::ILLEGAL_EPP_PARAMETERS, o)
+    else
+      acceptor.accept(Issues::ILLEGAL_EXPRESSION, o.functor_expr, {:feature=>'function name', :container => o})
     end
   end
 
@@ -203,24 +239,19 @@ class Puppet::Pops::Validation::Checker4_0
     end
   end
 
-  # for 'class' and 'define'
+  # for 'class', 'define', and function
   def check_NamedDefinition(o)
     top(o.eContainer, o)
     if o.name !~ Puppet::Pops::Patterns::CLASSREF
       acceptor.accept(Issues::ILLEGAL_DEFINITION_NAME, o, {:name=>o.name})
     end
+    if violator = ends_with_idem(o.body)
+      acceptor.accept(Issues::IDEM_NOT_ALLOWED_LAST, violator, {:container => o})
+    end
   end
 
   def check_IfExpression(o)
     rvalue(o.test)
-  end
-
-  def check_ImportExpression(o)
-    o.files.each do |f|
-      unless f.is_a? Model::LiteralString
-        acceptor.accept(Issues::ILLEGAL_EXPRESSION, f, :feature => 'file name', :container => o)
-      end
-    end
   end
 
   def check_KeyedEntry(o)
@@ -230,8 +261,6 @@ class Puppet::Pops::Validation::Checker4_0
     # acceptor.accept(Issues::ILLEGAL_EXPRESSION, o.key, :feature => 'hash key', :container => o.eContainer)
   end
 
-  # A Lambda is a Definition, but it may appear in other scopes than top scope (Which check_Definition asserts).
-  #
   def check_LambdaExpression(o)
   end
 
@@ -244,6 +273,9 @@ class Puppet::Pops::Validation::Checker4_0
     hostname(o.host_matches, o)
     hostname(o.parent, o, 'parent') unless o.parent.nil?
     top(o.eContainer, o)
+    if violator = ends_with_idem(o.body)
+      acceptor.accept(Issues::IDEM_NOT_ALLOWED_LAST, violator, {:container => o})
+    end
   end
 
   # No checking takes place - all expressions using a QualifiedName need to check. This because the
@@ -312,6 +344,10 @@ class Puppet::Pops::Validation::Checker4_0
     if o.form && o.form != :regular
       acceptor.accept(Issues::NOT_VIRTUALIZEABLE, o)
     end
+  end
+
+  def check_ReservedWord(o)
+    acceptor.accept(Issues::RESERVED_WORD, o, :word => o.word)
   end
 
   def check_SelectorExpression(o)
@@ -453,10 +489,6 @@ class Puppet::Pops::Validation::Checker4_0
   #
   def rvalue_Expression(o); end
 
-  def rvalue_ImportExpression(o)          ; acceptor.accept(Issues::NOT_RVALUE, o) ; end
-
-  def rvalue_BlockExpression(o)           ; acceptor.accept(Issues::NOT_RVALUE, o) ; end
-
   def rvalue_ResourceDefaultsExpression(o); acceptor.accept(Issues::NOT_RVALUE, o) ; end
 
   def rvalue_ResourceOverrideExpression(o); acceptor.accept(Issues::NOT_RVALUE, o) ; end
@@ -500,6 +532,110 @@ class Puppet::Pops::Validation::Checker4_0
   def top_LambdaExpression(o, definition)
     # fail, stop scanning parents
     acceptor.accept(Issues::NOT_TOP_LEVEL, definition)
+  end
+
+  #--IDEM CHECK
+  def idem_Object(o)
+    false
+  end
+
+  def idem_Nop(o)
+    true
+  end
+
+  def idem_NilClass(o)
+    true
+  end
+
+  def idem_Literal(o)
+    true
+  end
+
+  def idem_LiteralList(o)
+    true
+  end
+
+  def idem_LiteralHash(o)
+    true
+  end
+
+  def idem_Factory(o)
+    idem(o.current)
+  end
+
+  def idem_AccessExpression(o)
+    true
+  end
+
+  def idem_BinaryExpression(o)
+    true
+  end
+
+  def idem_RelationshipExpression(o)
+    # Always side effect
+    false
+  end
+
+  def idem_AssignmentExpression(o)
+    # Always side effect
+    false
+  end
+
+  # Handles UnaryMinusExpression, NotExpression, VariableExpression
+  def idem_UnaryExpression(o)
+    true
+  end
+
+  # Allow (no-effect parentheses) to be used around a productive expression
+  def idem_ParenthesizedExpression(o)
+    idem(o.expr)
+  end
+
+  def idem_RenderExpression(o)
+    false
+  end
+
+  def idem_RenderStringExpression(o)
+    false
+  end
+
+  def idem_BlockExpression(o)
+    # productive if there is at least one productive expression
+    ! o.statements.any? {|expr| !idem(expr) }
+  end
+
+  # Returns true even though there may be interpolated expressions that have side effect.
+  # Report as idem anyway, as it is very bad design to evaluate an interpolated string for its
+  # side effect only.
+  def idem_ConcatenatedString(o)
+    true
+  end
+
+  # Heredoc is just a string, but may contain interpolated string (which may have side effects).
+  # This is still bad design and should be reported as idem.
+  def idem_HeredocExpression(o)
+    true
+  end
+
+  # May technically have side effects inside the Selector, but this is bad design - treat as idem
+  def idem_SelectorExpression(o)
+    true
+  end
+
+  def idem_IfExpression(o)
+    [o.test, o.then_expr, o.else_expr].all? {|e| idem(e) }
+  end
+
+  # Case expression is idem, if test, and all options are idem
+  def idem_CaseExpression(o)
+    return false if !idem(o.test)
+    ! o.options.any? {|opt| !idem(opt) }
+  end
+
+  # An option is idem if values and the then_expression are idem
+  def idem_CaseOption(o)
+    return false if o.values.any? { |value| !idem(value) }
+    idem(o.then_expr)
   end
 
   #--- NON POLYMORPH, NON CHECKING CODE

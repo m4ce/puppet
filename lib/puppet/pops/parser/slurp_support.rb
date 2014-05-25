@@ -11,8 +11,8 @@ module Puppet::Pops::Parser::SlurpSupport
   SLURP_SQ_PATTERN  = /(?:[^\\]|^|[^\\])(?:[\\]{2})*[']/
   SLURP_DQ_PATTERN  = /(?:[^\\]|^|[^\\])(?:[\\]{2})*(["]|[$]\{?)/
   SLURP_UQ_PATTERN  = /(?:[^\\]|^|[^\\])(?:[\\]{2})*([$]\{?|\z)/
-  SLURP_ALL_PATTERN = /.*(\z)/
-  SQ_ESCAPES = %w{ ' }
+  SLURP_ALL_PATTERN = /.*(\z)/m
+  SQ_ESCAPES = %w{ \\ ' }
   DQ_ESCAPES = %w{ \\  $ ' " r n t s u}+["\r\n", "\n"]
   UQ_ESCAPES = %w{ \\  $ r n t s u}+["\r\n", "\n"]
 
@@ -65,7 +65,7 @@ module Puppet::Pops::Parser::SlurpSupport
     # Process unicode escapes first as they require getting 4 hex digits
     # If later a \u is found it is warned not to be a unicode escape
     if escapes.include?('u')
-      str.gsub!(/\\u([\da-fAF]{4})/m) {
+      str.gsub!(/\\u([\da-fA-F]{4})/m) {
         [$1.hex].pack("U")
       }
     end

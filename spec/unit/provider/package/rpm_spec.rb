@@ -44,6 +44,13 @@ describe provider_class do
     Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "--version"], execute_options).returns(rpm_version).at_most_once
   end
 
+  describe 'provider features' do
+    it { should be_versionable }
+    it { should be_install_options }
+    it { should be_uninstall_options }
+    it { should be_virtual_packages }
+  end
+
   describe "self.instances" do
     describe "with a modern version of RPM" do
       it "includes all the modern flags" do
@@ -188,36 +195,55 @@ describe provider_class do
 
     describe "on a modern RPM" do
       before(:each) do
-        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-q", "--whatprovides", "myresource", '--nosignature', '--nodigest', "--qf", nevra_format], execute_options).returns("myresource 0 1.2.3.4 5.el4 noarch\n")
+        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-q", "myresource", '--nosignature', '--nodigest', "--qf", nevra_format], execute_options).returns("myresource 0 1.2.3.4 5.el4 noarch\n")
       end
 
       let(:rpm_version) { "RPM version 4.10.0\n" }
 
       it "includes the architecture in the package name" do
-        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-e", 'myresource-1.2.3.4-5.el4.noarch'], execute_options).returns('').at_most_once
+        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", ["-e"], 'myresource-1.2.3.4-5.el4.noarch'], execute_options).returns('').at_most_once
         provider.uninstall
       end
     end
 
     describe "on an ancient RPM" do
       before(:each) do
-        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-q", "--whatprovides", "myresource", '', '', '--qf', nevra_format], execute_options).returns("myresource 0 1.2.3.4 5.el4 noarch\n")
+        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-q", "myresource", '', '', '--qf', nevra_format], execute_options).returns("myresource 0 1.2.3.4 5.el4 noarch\n")
       end
 
       let(:rpm_version) { "RPM version 3.0.6\n" }
 
       it "excludes the architecture from the package name" do
-        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-e", 'myresource-1.2.3.4-5.el4'], execute_options).returns('').at_most_once
+        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", ["-e"], 'myresource-1.2.3.4-5.el4'], execute_options).returns('').at_most_once
         provider.uninstall
       end
     end
 
+    describe "when uninstalled with options" do
+      before(:each) do
+        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-q", "myresource", '--nosignature', '--nodigest', "--qf", nevra_format], execute_options).returns("myresource 0 1.2.3.4 5.el4 noarch\n")
+      end
+
+      let(:resource) do
+        Puppet::Type.type(:package).new(
+          :name              => resource_name,
+          :ensure            => :absent,
+          :provider          => 'rpm',
+          :uninstall_options => ['--nodeps']
+        )
+      end
+
+      it "includes the options" do
+        Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", ["-e", "--nodeps"], 'myresource-1.2.3.4-5.el4.noarch'], execute_options)
+        provider.uninstall
+      end
+    end
   end
 
   describe "parsing" do
     def parser_test(rpm_output_string, gold_hash, number_of_debug_logs = 0)
       Puppet.expects(:debug).times(number_of_debug_logs)
-      Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-q", "--whatprovides", resource_name, "--nosignature", "--nodigest", "--qf", nevra_format], execute_options).returns(rpm_output_string)
+      Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-q", resource_name, "--nosignature", "--nodigest", "--qf", nevra_format], execute_options).returns(rpm_output_string)
       expect(provider.query).to eq(gold_hash)
     end
 
@@ -256,15 +282,31 @@ describe provider_class do
 
     it "does not log or fail if rpm returns package not found" do
       Puppet.expects(:debug).never
-      Puppet::Util::Execution.expects(:execute).with(["/bin/rpm", "-q", "--whatprovides", resource_name, "--nosignature", "--nodigest", "--qf", nevra_format], execute_options).raises Puppet::ExecutionFailure.new('package not found')
-
+      expected_args = ["/bin/rpm", "-q", resource_name, "--nosignature", "--nodigest", "--qf", nevra_format]
+      Puppet::Util::Execution.expects(:execute).with(expected_args, execute_options).raises Puppet::ExecutionFailure.new("package #{resource_name} is not installed")
       expect(provider.query).to be_nil
+    end
+
+    it "parses virtual package" do
+      provider.resource[:allow_virtual] = true
+      expected_args = ["/bin/rpm", "-q", resource_name, "--nosignature", "--nodigest", "--qf", nevra_format]
+      Puppet::Util::Execution.expects(:execute).with(expected_args, execute_options).raises Puppet::ExecutionFailure.new("package #{resource_name} is not installed")
+      Puppet::Util::Execution.expects(:execute).with(expected_args + ["--whatprovides"], execute_options).returns "myresource 0 1.2.3.4 5.el4 noarch\n"
+      expect(provider.query).to eq({
+        :name     => "myresource",
+        :epoch    => "0",
+        :version  => "1.2.3.4",
+        :release  => "5.el4",
+        :arch     => "noarch",
+        :provider => :rpm,
+        :ensure   => "1.2.3.4-5.el4"
+      })
     end
   end
 
   describe "#install_options" do
-    it "returns empty array by default" do
-      expect(provider.install_options).to eq([])
+    it "returns nil by default" do
+      expect(provider.install_options).to eq(nil)
     end
 
     it "returns install_options when set" do
@@ -278,12 +320,38 @@ describe provider_class do
     end
 
     it 'returns install_options when set as hash' do
-      provider.resource[:install_options] = { '-Darch' => 'vax' }
+      provider.resource[:install_options] = [{ '-Darch' => 'vax' }]
       expect(provider.install_options).to eq(['-Darch=vax'])
     end
+
     it 'returns install_options when an array with hashes' do
       provider.resource[:install_options] = [ '-L', { '-Darch' => 'vax' }]
       expect(provider.install_options).to eq(['-L', '-Darch=vax'])
+    end
+  end
+
+  describe "#uninstall_options" do
+    it "returns nil by default" do
+      expect(provider.uninstall_options).to eq(nil)
+    end
+
+    it "returns uninstall_options when set" do
+      provider.resource[:uninstall_options] = ['-n']
+      expect(provider.uninstall_options).to eq(['-n'])
+    end
+
+    it "returns multiple uninstall_options when set" do
+      provider.resource[:uninstall_options] = ['-L', '/opt/puppet']
+      expect(provider.uninstall_options).to eq(['-L', '/opt/puppet'])
+    end
+
+    it 'returns uninstall_options when set as hash' do
+      provider.resource[:uninstall_options] = [{ '-Darch' => 'vax' }]
+      expect(provider.uninstall_options).to eq(['-Darch=vax'])
+    end
+    it 'returns uninstall_options when an array with hashes' do
+      provider.resource[:uninstall_options] = [ '-L', { '-Darch' => 'vax' }]
+      expect(provider.uninstall_options).to eq(['-L', '-Darch=vax'])
     end
   end
 

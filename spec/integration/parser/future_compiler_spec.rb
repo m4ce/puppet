@@ -1,28 +1,19 @@
-#! /usr/bin/env ruby
 require 'spec_helper'
 require 'puppet/pops'
 require 'puppet/parser/parser_factory'
 require 'puppet_spec/compiler'
 require 'puppet_spec/pops'
 require 'puppet_spec/scope'
+require 'matchers/resource'
 require 'rgen/metamodel_builder'
 
 # Test compilation using the future evaluator
-#
 describe "Puppet::Parser::Compiler" do
   include PuppetSpec::Compiler
+  include Matchers::Resource
 
   before :each do
     Puppet[:parser] = 'future'
-
-    # This is in the original test - what is this for? Does not seem to make a difference at all
-    @scope_resource = stub 'scope_resource', :builtin? => true, :finish => nil, :ref => 'Class[main]'
-    @scope = stub 'scope', :resource => @scope_resource, :source => mock("source")
-  end
-
-
-  after do
-    Puppet.settings.clear
   end
 
   describe "the compiler when using future parser and evaluator" do
@@ -34,14 +25,15 @@ describe "Puppet::Parser::Compiler" do
 
         Puppet.settings[:config_version] = 'git rev-parse HEAD'
 
-        parser = Puppet::Parser::ParserFactory.parser "development"
         compiler = Puppet::Parser::Compiler.new(Puppet::Node.new("testnode"))
         compiler.catalog.version.should == version
       end
     end
 
     it "should not create duplicate resources when a class is referenced both directly and indirectly by the node classifier (4792)" do
-      Puppet[:code] = <<-PP
+      node = Puppet::Node.new("testnodex")
+      node.classes = ['foo', 'bar']
+      catalog = compile_to_catalog(<<-PP, node)
         class foo
         {
           notify { foo_notify: }
@@ -53,17 +45,57 @@ describe "Puppet::Parser::Compiler" do
         }
       PP
 
-      node = Puppet::Node.new("testnodex")
-      node.classes = ['foo', 'bar']
       catalog = Puppet::Parser::Compiler.compile(node)
-      node.classes = nil
-      catalog.resource("Notify[foo_notify]").should_not be_nil
-      catalog.resource("Notify[bar_notify]").should_not be_nil
+
+      expect(catalog).to have_resource("Notify[foo_notify]")
+      expect(catalog).to have_resource("Notify[bar_notify]")
+    end
+
+    it 'applies defaults for defines with qualified names (PUP-2302)' do
+      catalog = compile_to_catalog(<<-CODE)
+        define my::thing($msg = 'foo') { notify {'check_me': message => $msg } }
+        My::Thing { msg => 'evoe' }
+        my::thing { 'name': }
+      CODE
+
+      expect(catalog).to have_resource("Notify[check_me]").with_parameter(:message, "evoe")
+    end
+
+    it 'does not apply defaults from dynamic scopes (PUP-867)' do
+      catalog = compile_to_catalog(<<-CODE)
+      class a {
+        Notify { message => "defaulted" }
+        include b
+        notify { bye: }
+      }
+      class b { notify { hi: } }
+
+      include a
+      CODE
+      expect(catalog).to have_resource("Notify[hi]").with_parameter(:message, nil)
+      expect(catalog).to have_resource("Notify[bye]").with_parameter(:message, "defaulted")
+    end
+
+    it 'gets default from inherited class (PUP-867)' do
+      catalog = compile_to_catalog(<<-CODE)
+      class a {
+        Notify { message => "defaulted" }
+        include c
+        notify { bye: }
+      }
+      class b { Notify { message => "inherited" } }
+      class c inherits b { notify { hi: } }
+
+      include a
+      CODE
+
+      expect(catalog).to have_resource("Notify[hi]").with_parameter(:message, "inherited")
+      expect(catalog).to have_resource("Notify[bye]").with_parameter(:message, "defaulted")
     end
 
     describe "when resolving class references" do
       it "should favor local scope, even if there's an included class in topscope" do
-        Puppet[:code] = <<-PP
+        catalog = compile_to_catalog(<<-PP)
           class experiment {
             class baz {
             }
@@ -76,15 +108,11 @@ describe "Puppet::Parser::Compiler" do
           include experiment::baz
         PP
 
-        catalog = Puppet::Parser::Compiler.compile(Puppet::Node.new("mynode"))
-
-        notify_resource = catalog.resource( "Notify[x]" )
-
-        notify_resource[:require].title.should == "Experiment::Baz"
+        expect(catalog).to have_resource("Notify[x]").with_parameter(:require, be_resource("Class[Experiment::Baz]"))
       end
 
       it "should favor local scope, even if there's an unincluded class in topscope" do
-        Puppet[:code] = <<-PP
+        catalog = compile_to_catalog(<<-PP)
           class experiment {
             class baz {
             }
@@ -96,18 +124,15 @@ describe "Puppet::Parser::Compiler" do
           include experiment::baz
         PP
 
-        catalog = Puppet::Parser::Compiler.compile(Puppet::Node.new("mynode"))
-
-        notify_resource = catalog.resource( "Notify[x]" )
-
-        notify_resource[:require].title.should == "Experiment::Baz"
+        expect(catalog).to have_resource("Notify[x]").with_parameter(:require, be_resource("Class[Experiment::Baz]"))
       end
     end
+
     describe "(ticket #13349) when explicitly specifying top scope" do
       ["class {'::bar::baz':}", "include ::bar::baz"].each do |include|
         describe "with #{include}" do
           it "should find the top level class" do
-            Puppet[:code] = <<-MANIFEST
+            catalog = compile_to_catalog(<<-MANIFEST)
               class { 'foo::test': }
               class foo::test {
               	#{include}
@@ -120,12 +145,10 @@ describe "Puppet::Parser::Compiler" do
               }
             MANIFEST
 
-            catalog = Puppet::Parser::Compiler.compile(Puppet::Node.new("mynode"))
-
-            catalog.resource("Class[Bar::Baz]").should_not be_nil
-            catalog.resource("Notify[good!]").should_not be_nil
-            catalog.resource("Class[Foo::Bar::Baz]").should be_nil
-            catalog.resource("Notify[bad!]").should be_nil
+            expect(catalog).to have_resource("Class[Bar::Baz]")
+            expect(catalog).to have_resource("Notify[good!]")
+            expect(catalog).to_not have_resource("Class[Foo::Bar::Baz]")
+            expect(catalog).to_not have_resource("Notify[bad!]")
           end
         end
       end
@@ -144,39 +167,27 @@ describe "Puppet::Parser::Compiler" do
 
     ['define', 'class', 'node'].each do |thing|
       it "'#{thing}' is not allowed inside evaluated conditional constructs" do
-        Puppet[:code] = <<-PP
-          if true {
-            #{thing} foo {
+        expect do
+          compile_to_catalog(<<-PP)
+            if true {
+              #{thing} foo {
+              }
+              notify { decoy: }
             }
-            notify { decoy: }
-          }
-        PP
-
-        begin
-          catalog = Puppet::Parser::Compiler.compile(Puppet::Node.new("mynode"))
-          raise "compilation should have raised Puppet::Error"
-        rescue Puppet::Error => e
-          e.message.should =~ /Classes, definitions, and nodes may only appear at toplevel/
-        end
+          PP
+        end.to raise_error(Puppet::Error, /Classes, definitions, and nodes may only appear at toplevel/)
       end
-    end
 
-    ['define', 'class', 'node'].each do |thing|
       it "'#{thing}' is not allowed inside un-evaluated conditional constructs" do
-        Puppet[:code] = <<-PP
-          if false {
-            #{thing} foo {
+        expect do
+          compile_to_catalog(<<-PP)
+            if false {
+              #{thing} foo {
+              }
+              notify { decoy: }
             }
-            notify { decoy: }
-          }
-        PP
-
-        begin
-          catalog = Puppet::Parser::Compiler.compile(Puppet::Node.new("mynode"))
-          raise "compilation should have raised Puppet::Error"
-        rescue Puppet::Error => e
-          e.message.should =~ /Classes, definitions, and nodes may only appear at toplevel/
-        end
+          PP
+        end.to raise_error(Puppet::Error, /Classes, definitions, and nodes may only appear at toplevel/)
       end
     end
 
@@ -185,9 +196,8 @@ describe "Puppet::Parser::Compiler" do
         ref.sub(/File\[(\w+)\]/, '\1')
       end
 
-      let(:node) { Puppet::Node.new('mynode') }
-      let(:code) do
-        <<-MANIFEST
+      def assert_creates_relationships(relationship_code, expectations)
+        base_manifest = <<-MANIFEST
           file { [a,b,c]:
             mode => 0644,
           }
@@ -195,17 +205,7 @@ describe "Puppet::Parser::Compiler" do
             mode => 0755,
           }
         MANIFEST
-      end
-      let(:expected_relationships) { [] }
-      let(:expected_subscriptions) { [] }
-
-      before :each do
-        Puppet[:parser] = 'future'
-        Puppet[:code] = code
-      end
-
-      after :each do
-        catalog = Puppet::Parser::Compiler.compile(node)
+        catalog = compile_to_catalog(base_manifest + relationship_code)
 
         resources = catalog.resources.select { |res| res.type == 'File' }
 
@@ -216,63 +216,53 @@ describe "Puppet::Parser::Compiler" do
           end.inject(&:concat)
         end
 
-        actual_relationships.should =~ expected_relationships
-        actual_subscriptions.should =~ expected_subscriptions
+        actual_relationships.should =~ (expectations[:relationships] || [])
+        actual_subscriptions.should =~ (expectations[:subscriptions] || [])
       end
 
       it "of regular type" do
-        code << "File[a] -> File[b]"
-
-        expected_relationships << ['a','b']
+        assert_creates_relationships("File[a] -> File[b]",
+                                     :relationships => [['a','b']])
       end
 
       it "of subscription type" do
-        code << "File[a] ~> File[b]"
-
-        expected_subscriptions << ['a', 'b']
+        assert_creates_relationships("File[a] ~> File[b]",
+                                     :subscriptions => [['a', 'b']])
       end
 
       it "between multiple resources expressed as resource with multiple titles" do
-        code << "File[a,b] -> File[c,d]"
-
-        expected_relationships.concat [
-          ['a', 'c'],
-          ['b', 'c'],
-          ['a', 'd'],
-          ['b', 'd'],
-        ]
+        assert_creates_relationships("File[a,b] -> File[c,d]",
+                                     :relationships => [['a', 'c'],
+                                                        ['b', 'c'],
+                                                        ['a', 'd'],
+                                                        ['b', 'd']])
       end
 
       it "between collection expressions" do
-        code << "File <| mode == 0644 |> -> File <| mode == 0755 |>"
-
-        expected_relationships.concat [
-          ['a', 'd'],
-          ['b', 'd'],
-          ['c', 'd'],
-          ['a', 'e'],
-          ['b', 'e'],
-          ['c', 'e'],
-        ]
+        assert_creates_relationships("File <| mode == 0644 |> -> File <| mode == 0755 |>",
+                                     :relationships => [['a', 'd'],
+                                                        ['b', 'd'],
+                                                        ['c', 'd'],
+                                                        ['a', 'e'],
+                                                        ['b', 'e'],
+                                                        ['c', 'e']])
       end
 
       it "between resources expressed as Strings" do
-        code << "'File[a]' -> 'File[b]'"
-
-        expected_relationships << ['a', 'b']
+        assert_creates_relationships("'File[a]' -> 'File[b]'",
+                                     :relationships => [['a', 'b']])
       end
 
       it "between resources expressed as variables" do
-        code << <<-MANIFEST
+        assert_creates_relationships(<<-MANIFEST, :relationships => [['a', 'b']])
           $var = File[a]
           $var -> File[b]
         MANIFEST
 
-        expected_relationships << ['a', 'b']
       end
 
       it "between resources expressed as case statements" do
-        code << <<-MANIFEST
+        assert_creates_relationships(<<-MANIFEST, :relationships => [['s1', 't2']])
           $var = 10
           case $var {
             10: {
@@ -292,39 +282,63 @@ describe "Puppet::Parser::Compiler" do
             }
           }
         MANIFEST
-
-        expected_relationships << ['s1', 't2']
       end
 
       it "using deep access in array" do
-        code << <<-MANIFEST
+        assert_creates_relationships(<<-MANIFEST, :relationships => [['a', 'b']])
           $var = [ [ [ File[a], File[b] ] ] ]
           $var[0][0][0] -> $var[0][0][1]
         MANIFEST
 
-        expected_relationships << ['a', 'b']
       end
 
       it "using deep access in hash" do
-        code << <<-MANIFEST
+        assert_creates_relationships(<<-MANIFEST, :relationships => [['a', 'b']])
           $var = {'foo' => {'bar' => {'source' => File[a], 'target' => File[b]}}}
           $var[foo][bar][source] -> $var[foo][bar][target]
         MANIFEST
 
-        expected_relationships << ['a', 'b']
       end
 
       it "using resource declarations" do
-        code << "file { l: } -> file { r: }"
-
-        expected_relationships << ['l', 'r']
+        assert_creates_relationships("file { l: } -> file { r: }", :relationships => [['l', 'r']])
       end
 
       it "between entries in a chain of relationships" do
-        code << "File[a] -> File[b] ~> File[c] <- File[d] <~ File[e]"
+        assert_creates_relationships("File[a] -> File[b] ~> File[c] <- File[d] <~ File[e]",
+                                     :relationships => [['a', 'b'], ['d', 'c']],
+                                     :subscriptions => [['b', 'c'], ['e', 'd']])
+      end
+    end
 
-        expected_relationships << ['a', 'b'] << ['d', 'c']
-        expected_subscriptions << ['b', 'c'] << ['e', 'd']
+    context "when dealing with variable references" do
+      it 'an initial underscore in a variable name is ok' do
+        catalog = compile_to_catalog(<<-MANIFEST)
+          class a { $_a = 10}
+          include a
+          notify { 'test': message => $a::_a }
+        MANIFEST
+
+        expect(catalog).to have_resource("Notify[test]").with_parameter(:message, 10)
+      end
+
+      it 'an initial underscore in not ok if elsewhere than last segment' do
+        expect do
+          catalog = compile_to_catalog(<<-MANIFEST)
+            class a { $_a = 10}
+            include a
+            notify { 'test': message => $_a::_a }
+          MANIFEST
+        end.to raise_error(/Illegal variable name/)
+      end
+
+      it 'a missing variable as default value becomes undef' do
+        catalog = compile_to_catalog(<<-MANIFEST)
+          class a ($b=$x) { notify {$b: message=>'meh'} }
+          include a
+        MANIFEST
+
+        expect(catalog).to have_resource("Notify[undef]").with_parameter(:message, "meh")
       end
     end
 
@@ -342,7 +356,7 @@ describe "Puppet::Parser::Compiler" do
             notify { 'test': message => $trusted[data] }
           MANIFEST
 
-          catalog.resource("Notify[test]")[:message].should == "value"
+          expect(catalog).to have_resource("Notify[test]").with_parameter(:message, "value")
         end
 
         it 'should not allow assignment to $trusted' do
@@ -350,11 +364,10 @@ describe "Puppet::Parser::Compiler" do
           node.trusted_data = { "data" => "value" }
 
           expect do
-            catalog = compile_to_catalog(<<-MANIFEST, node)
+            compile_to_catalog(<<-MANIFEST, node)
               $trusted = 'changed'
               notify { 'test': message => $trusted == 'changed' }
             MANIFEST
-            catalog.resource("Notify[test]")[:message].should == true
           end.to raise_error(Puppet::Error, /Attempt to assign to a reserved variable name: 'trusted'/)
         end
       end
@@ -372,21 +385,18 @@ describe "Puppet::Parser::Compiler" do
             notify { 'test': message => ($trusted == undef) }
           MANIFEST
 
-          catalog.resource("Notify[test]")[:message].should == true
+          expect(catalog).to have_resource("Notify[test]").with_parameter(:message, true)
         end
 
         it 'should allow assignment to $trusted' do
-          node = Puppet::Node.new("testing")
-
-          catalog = compile_to_catalog(<<-MANIFEST, node)
+          catalog = compile_to_catalog(<<-MANIFEST)
             $trusted = 'changed'
             notify { 'test': message => $trusted == 'changed' }
           MANIFEST
 
-          catalog.resource("Notify[test]")[:message].should == true
+          expect(catalog).to have_resource("Notify[test]").with_parameter(:message, true)
         end
       end
     end
   end
-
 end

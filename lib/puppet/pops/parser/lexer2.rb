@@ -87,6 +87,7 @@ class Puppet::Pops::Parser::Lexer2
 
   # Tokens that are always unique to what has been lexed
   TOKEN_STRING         =  [:STRING, nil,          0].freeze
+  TOKEN_WORD           =  [:WORD, nil,            0].freeze
   TOKEN_DQPRE          =  [:DQPRE,  nil,          0].freeze
   TOKEN_DQMID          =  [:DQPRE,  nil,          0].freeze
   TOKEN_DQPOS          =  [:DQPRE,  nil,          0].freeze
@@ -94,11 +95,13 @@ class Puppet::Pops::Parser::Lexer2
   TOKEN_VARIABLE       =  [:VARIABLE, nil,        1].freeze
   TOKEN_VARIABLE_EMPTY =  [:VARIABLE, ''.freeze,  1].freeze
 
-  # Tokens that start HEREDOC and EPP, both have syntax as an argument.
-  # These tokens are always unique to what has been lexed.
-  #
+  # HEREDOC has syntax as an argument.
   TOKEN_HEREDOC        =  [:HEREDOC, nil, 0].freeze
-  TOKEN_EPPSTART       =  [:EPPSTART, nil, 0].freeze
+
+  # EPP_START is currently a marker token, may later get syntax
+  TOKEN_EPPSTART       =  [:EPP_START, nil, 0].freeze
+  TOKEN_EPPEND         =  [:EPP_END, '%>', 2].freeze
+  TOKEN_EPPEND_TRIM    =  [:EPP_END_TRIM, '-%>', 3].freeze
 
   # This is used for unrecognized tokens, will always be a single character. This particular instance
   # is not used, but is kept here for documentation purposes.
@@ -108,22 +111,26 @@ class Puppet::Pops::Parser::Lexer2
   # Booleans are pre-calculated (rather than evaluating the strings "false" "true" repeatedly.
   #
   KEYWORDS = {
-    "case"     => [:CASE,    'case',     4],
-    "class"    => [:CLASS,   'class',    5],
-    "default"  => [:DEFAULT, 'default',  7],
-    "define"   => [:DEFINE,  'define',   6],
-    "if"       => [:IF,      'if',       2],
-    "elsif"    => [:ELSIF,   'elsif',    5],
-    "else"     => [:ELSE,    'else',     4],
-    "inherits" => [:INHERITS,'inherits', 8],
-    "node"     => [:NODE,    'node',     4],
-    "and"      => [:AND,     'and',      3],
-    "or"       => [:OR,      'or',       2],
-    "undef"    => [:UNDEF,   'undef',    5],
-    "false"    => [:BOOLEAN, false,      5],
-    "true"     => [:BOOLEAN, true,       4],
-    "in"       => [:IN,      'in',       2],
-    "unless"   => [:UNLESS,  'unless',   6],
+    "case"     => [:CASE,     'case',     4],
+    "class"    => [:CLASS,    'class',    5],
+    "default"  => [:DEFAULT,  'default',  7],
+    "define"   => [:DEFINE,   'define',   6],
+    "if"       => [:IF,       'if',       2],
+    "elsif"    => [:ELSIF,    'elsif',    5],
+    "else"     => [:ELSE,     'else',     4],
+    "inherits" => [:INHERITS, 'inherits', 8],
+    "node"     => [:NODE,     'node',     4],
+    "and"      => [:AND,      'and',      3],
+    "or"       => [:OR,       'or',       2],
+    "undef"    => [:UNDEF,    'undef',    5],
+    "false"    => [:BOOLEAN,  false,      5],
+    "true"     => [:BOOLEAN,  true,       4],
+    "in"       => [:IN,       'in',       2],
+    "unless"   => [:UNLESS,   'unless',   6],
+    "function" => [:FUNCTION, 'function', 8],
+    "type"     => [:TYPE,     'type',     4],
+    "attr"     => [:ATTR,     'attr',     4],
+    "private"  => [:PRIVATE,  'private',  7],
   }
   KEYWORDS.each {|k,v| v[1].freeze; v.freeze }
   KEYWORDS.freeze
@@ -154,6 +161,8 @@ class Puppet::Pops::Parser::Lexer2
   #
   PATTERN_CLASSREF       = %r{((::){0,1}[A-Z][\w]*)+}
   PATTERN_NAME           = %r{((::)?[a-z][\w]*)(::[a-z][\w]*)*}
+
+  PATTERN_BARE_WORD      = %r{[a-z_](?:[\w-]*[\w])?}
 
   PATTERN_DOLLAR_VAR     = %r{\$(::)?(\w+::)*\w+}
   PATTERN_NUMBER         = %r{\b(?:0[xX][0-9A-Fa-f]+|0?\d+(?:\.\d+)?(?:[eE]-?\d+)?)\b}
@@ -250,10 +259,10 @@ class Puppet::Pops::Parser::Lexer2
 
   # A block must be passed to scan. It will be called with two arguments, a symbol for the token,
   # and an instance of LexerSupport::TokenValue
-  # PERFORMANCE NOTE: The TokenValue is designed to reduce the amount of garbage / termporary data
-  # and to only convert the lexer's internal tokens on demand. It is slightly mroe costly to create an
+  # PERFORMANCE NOTE: The TokenValue is designed to reduce the amount of garbage / temporary data
+  # and to only convert the lexer's internal tokens on demand. It is slightly more costly to create an
   # instance of a class defined in Ruby than an Array or Hash, but the gain is much bigger since transformation
-  # logic is avoided for many of its memebers (most are never used (e.g. line/pos information which is only of
+  # logic is avoided for many of its members (most are never used (e.g. line/pos information which is only of
   # value in general for error messages, and for some expressions (which the lexer does not know about).
   #
   def scan
@@ -319,7 +328,7 @@ class Puppet::Pops::Parser::Lexer2
       emit(TOKEN_COMMA, before)
 
     when '['
-      if ctx[:after] == :NAME && (before == 0 || scn.string[before-1,1] =~ /[[:blank:]\r\n]+/)
+      if (before == 0 || scn.string[before-1,1] =~ /[[:blank:]\r\n]+/)
         emit(TOKEN_LISTSTART, before)
       else
         emit(TOKEN_LBRACK, before)
@@ -346,6 +355,9 @@ class Puppet::Pops::Parser::Lexer2
     when '%'
       if la1 == '>' && ctx[:epp_mode]
         scn.pos += 2
+        if ctx[:epp_mode] == :expr
+          enqueue_completed(TOKEN_EPPEND, before)
+        end
         ctx[:epp_mode] = :text
         interpolate_epp
       else
@@ -416,6 +428,9 @@ class Puppet::Pops::Parser::Lexer2
     when '-'
       if ctx[:epp_mode] && la1 == '%' && la2 == '>'
         scn.pos += 3
+        if ctx[:epp_mode] == :expr
+          enqueue_completed(TOKEN_EPPEND_TRIM, before)
+        end
         interpolate_epp(:with_trim)
       else
         emit(case la1
@@ -563,14 +578,27 @@ class Puppet::Pops::Parser::Lexer2
       end
 
     when 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
-    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z'
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '_'
       value = scn.scan(PATTERN_NAME)
-      if value
+      # NAME or false start because followed by hyphen(s), underscore or word
+      if value && !scn.match?(/^-+\w/)
         emit_completed(KEYWORDS[value] || [:NAME, value, scn.pos - before], before)
       else
-        # move to faulty position ([a-z] was ok)
-        scn.pos = scn.pos + 1
-        lex_error("Illegal name")
+        # Restart and check entire pattern (for ease of detecting non allowed trailing hyphen)
+        scn.pos = before
+        value = scn.scan(PATTERN_BARE_WORD)
+        # If the WORD continues with :: it must be a correct fully qualified name
+        if value && !(fully_qualified = scn.match?(/::/))
+          emit_completed([:WORD, value, scn.pos - before], before)
+        else
+          # move to faulty position ([a-z_] was ok)
+          scn.pos = scn.pos + 1
+          if fully_qualified
+            lex_error("Illegal fully qualified name")
+          else
+            lex_error("Illegal name or bare word")
+          end
+        end
       end
 
     when 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',

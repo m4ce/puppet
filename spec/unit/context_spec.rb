@@ -71,4 +71,66 @@ describe Puppet::Context do
       expect(context.lookup("a")).to eq(1)
     end
   end
+
+  context "a rollback" do
+    it "returns to the mark" do
+      context.push("a" => 1)
+      context.mark("start")
+      context.push("a" => 2)
+      context.push("a" => 3)
+      context.pop
+
+      context.rollback("start")
+
+      expect(context.lookup("a")).to eq(1)
+    end
+
+    it "rolls back to the mark across a scoped override" do
+      context.push("a" => 1)
+      context.mark("start")
+      context.override("a" => 3) do
+
+        context.rollback("start")
+
+        expect(context.lookup("a")).to eq(1)
+      end
+      expect(context.lookup("a")).to eq(1)
+    end
+
+    it "fails to rollback to an unknown mark" do
+      expect do
+        context.rollback("unknown")
+      end.to raise_error(Puppet::Context::UnknownRollbackMarkError)
+    end
+
+    it "does not allow the same mark to be set twice" do
+      context.mark("duplicate")
+      expect do
+        context.mark("duplicate")
+      end.to raise_error(Puppet::Context::DuplicateRollbackMarkError)
+    end
+  end
+
+  context 'support lazy entries' do
+    it 'by evaluating a bound proc' do
+      result = nil
+      context.override(:a => lambda {|| 'yay'}) do
+        result = context.lookup(:a)
+      end
+      expect(result).to eq('yay')
+    end
+
+    it 'by memoizing the bound value' do
+      result1 = nil
+      result2 = nil
+      original = 'yay'
+      context.override(:a => lambda {|| tmp = original; original = 'no'; tmp}) do
+        result1 = context.lookup(:a)
+        result2 = context.lookup(:a)
+      end
+      expect(result1).to eq('yay')
+      expect(original).to eq('no')
+      expect(result2).to eq('yay')
+    end
+  end
 end

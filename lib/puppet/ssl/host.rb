@@ -203,7 +203,7 @@ DOC
 
       # get the CA cert first, since it's required for the normal cert
       # to be of any use.
-      return nil unless Certificate.indirection.find("ca") unless ca?
+      return nil unless Certificate.indirection.find("ca", :fail_on_404 => true) unless ca?
       return nil unless @certificate = Certificate.indirection.find(name)
 
       validate_certificate_with_key
@@ -222,8 +222,9 @@ To fix this, remove the certificate from both the master and the agent and then 
 On the master:
   puppet cert clean #{Puppet[:certname]}
 On the agent:
-  rm -f #{Puppet[:hostcert]}
-  puppet agent -t
+  1a. On most platforms: find #{Puppet[:ssldir]} -name #{Puppet[:certname]}.pem -delete
+  1b. On Windows: del "#{Puppet[:ssldir]}/#{Puppet[:certname]}.pem" /f
+  2. puppet agent -t
 ERROR_STRING
     end
   end

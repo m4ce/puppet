@@ -6,14 +6,25 @@ require 'puppet/module_tool'
 
 describe Puppet::ModuleTool do
   describe '.is_module_root?' do
-    it 'should return true if directory has a module file' do
+    it 'should return true if directory has a Modulefile file' do
+      FileTest.expects(:file?).with(responds_with(:to_s, '/a/b/c/metadata.json')).
+        returns(false)
       FileTest.expects(:file?).with(responds_with(:to_s, '/a/b/c/Modulefile')).
         returns(true)
 
       subject.is_module_root?(Pathname.new('/a/b/c')).should be_true
     end
 
-    it 'should return false if directory does not have a module file' do
+    it 'should return true if directory has a metadata.json file' do
+      FileTest.expects(:file?).with(responds_with(:to_s, '/a/b/c/metadata.json')).
+        returns(true)
+
+      subject.is_module_root?(Pathname.new('/a/b/c')).should be_true
+    end
+
+    it 'should return false if directory does not have a metadata.json or a Modulefile file' do
+      FileTest.expects(:file?).with(responds_with(:to_s, '/a/b/c/metadata.json')).
+        returns(false)
       FileTest.expects(:file?).with(responds_with(:to_s, '/a/b/c/Modulefile')).
         returns(false)
 
@@ -155,50 +166,165 @@ TREE
 
   describe '.set_option_defaults' do
     let(:options) { {} }
-    let(:modulepath) { [File.expand_path('/env/module/path'), File.expand_path('/global/module/path')] }
-    let(:environment) { Puppet::Node::Environment.create('current', modulepath, '') }
-    around(:each) do |example|
-      Puppet.override(:current_environment => environment) do
+    let(:modulepath) { ['/env/module/path', '/global/module/path'] }
+    let(:environment_name) { :current_environment }
+    let(:environment) { Puppet::Node::Environment.create(environment_name, modulepath) }
+
+    subject do
+      described_class.set_option_defaults(options)
+      options
+    end
+
+    around do |example|
+      envs = Puppet::Environments::Combined.new(
+        Puppet::Environments::Static.new(environment),
+        Puppet::Environments::Legacy.new
+      )
+
+      Puppet.override(:environments => envs) do
         example.run
       end
     end
 
-    describe 'option :environment_instance' do
-      it 'adds an environment_instance to the options hash' do
-        subject.set_option_defaults(options)
-        expect(options[:environment_instance].name).to eq(environment.name)
-        expect(options[:environment_instance].modulepath).to eq(environment.modulepath)
+    describe ':environment' do
+      context 'as String' do
+        let(:options) { { :environment => "#{environment_name}" } }
+
+        it 'assigns the environment with the given name to :environment_instance' do
+          expect(subject).to include :environment_instance => environment
+        end
+      end
+
+      context 'as Symbol' do
+        let(:options) { { :environment => :"#{environment_name}" } }
+
+        it 'assigns the environment with the given name to :environment_instance' do
+          expect(subject).to include :environment_instance => environment
+        end
+      end
+
+      context 'as Puppet::Node::Environment' do
+        let(:env) { Puppet::Node::Environment.create('anonymous', []) }
+        let(:options) { { :environment => env } }
+
+        it 'assigns the given environment to :environment_instance' do
+          expect(subject).to include :environment_instance => env
+        end
       end
     end
 
-    describe 'option :target_dir' do
-      let (:target_dir) { 'boo' }
+    describe ':modulepath' do
+      let(:options) do
+        { :modulepath => %w[bar foo baz].join(File::PATH_SEPARATOR) }
+      end
 
-      context 'passed:' do
-        let (:options) { {:target_dir => target_dir} }
+      let(:paths) { options[:modulepath].split(File::PATH_SEPARATOR).map { |dir| File.expand_path(dir) } }
 
-        it 'prepends the target_dir into the environment_instance modulepath' do
-          subject.set_option_defaults options
+      it 'is expanded to an absolute path' do
+        expect(subject[:environment_instance].full_modulepath).to eql paths
+      end
 
-          expect(options[:environment_instance].full_modulepath).
-            to eq([File.expand_path(target_dir)] + modulepath)
+      it 'is used to compute :target_dir' do
+        expect(subject).to include :target_dir => paths.first
+      end
+
+      context 'conflicts with :environment' do
+        let(:options) do
+          { :modulepath => %w[bar foo baz].join(File::PATH_SEPARATOR), :environment => environment_name }
         end
 
-        it 'expands the target dir' do
-          subject.set_option_defaults options
+        it 'replaces the modulepath of the :environment_instance' do
+          expect(subject[:environment_instance].full_modulepath).to eql paths
+        end
 
-          options[:target_dir].should == File.expand_path(target_dir)
+        it 'is used to compute :target_dir' do
+          expect(subject).to include :target_dir => paths.first
+        end
+      end
+    end
+
+    describe ':target_dir' do
+      let(:options) do
+        { :target_dir => 'foo' }
+      end
+
+      let(:target) { File.expand_path(options[:target_dir]) }
+
+      it 'is expanded to an absolute path' do
+        expect(subject).to include :target_dir => target
+      end
+
+      it 'is prepended to the modulepath of the :environment_instance' do
+        expect(subject[:environment_instance].full_modulepath.first).to eql target
+      end
+
+      context 'conflicts with :modulepath' do
+        let(:options) do
+          { :target_dir => 'foo', :modulepath => %w[bar foo baz].join(File::PATH_SEPARATOR) }
+        end
+
+        it 'is prepended to the modulepath of the :environment_instance' do
+          expect(subject[:environment_instance].full_modulepath.first).to eql target
+        end
+
+        it 'shares the provided :modulepath via the :environment_instance' do
+          paths = %w[foo] + options[:modulepath].split(File::PATH_SEPARATOR)
+          paths.map! { |dir| File.expand_path(dir) }
+          expect(subject[:environment_instance].full_modulepath).to eql paths
         end
       end
 
-      context 'NOT passed:' do
-        it 'the option should be set to the first component of Puppet[:modulepath]' do
-          options = Hash.new
-          subject.set_option_defaults options
+      context 'conflicts with :environment' do
+        let(:options) do
+          { :target_dir => 'foo', :environment => environment_name }
+        end
 
-          expect(options[:target_dir]).to eq(environment.full_modulepath.first)
+        it 'is prepended to the modulepath of the :environment_instance' do
+          expect(subject[:environment_instance].full_modulepath.first).to eql target
+        end
+
+        it 'shares the provided :modulepath via the :environment_instance' do
+          paths = %w[foo] + environment.full_modulepath
+          paths.map! { |dir| File.expand_path(dir) }
+          expect(subject[:environment_instance].full_modulepath).to eql paths
         end
       end
+
+      context 'when not passed' do
+        it 'is populated with the first component of the modulepath' do
+          expect(subject).to include :target_dir => subject[:environment_instance].full_modulepath.first
+        end
+      end
+    end
+  end
+
+  describe '.parse_module_dependency' do
+    it 'parses a dependency without a version range expression' do
+      name, range, expr = subject.parse_module_dependency('source', 'name' => 'foo-bar')
+      expect(name).to eql('foo-bar')
+      expect(range).to eql(Semantic::VersionRange.parse('>= 0.0.0'))
+      expect(expr).to eql('>= 0.0.0')
+    end
+
+    it 'parses a dependency with a version range expression' do
+      name, range, expr = subject.parse_module_dependency('source', 'name' => 'foo-bar', 'version_requirement' => '1.2.x')
+      expect(name).to eql('foo-bar')
+      expect(range).to eql(Semantic::VersionRange.parse('1.2.x'))
+      expect(expr).to eql('1.2.x')
+    end
+
+    it 'parses a dependency with a version range expression in the (deprecated) versionRange key' do
+      name, range, expr = subject.parse_module_dependency('source', 'name' => 'foo-bar', 'versionRequirement' => '1.2.x')
+      expect(name).to eql('foo-bar')
+      expect(range).to eql(Semantic::VersionRange.parse('1.2.x'))
+      expect(expr).to eql('1.2.x')
+    end
+
+    it 'does not raise an error on invalid version range expressions' do
+      name, range, expr = subject.parse_module_dependency('source', 'name' => 'foo-bar', 'version_requirement' => 'nope')
+      expect(name).to eql('foo-bar')
+      expect(range).to eql(Semantic::VersionRange::EMPTY_RANGE)
+      expect(expr).to eql('nope')
     end
   end
 end

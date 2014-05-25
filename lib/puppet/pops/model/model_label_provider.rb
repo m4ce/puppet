@@ -22,6 +22,7 @@ class Puppet::Pops::Model::ModelLabelProvider < Puppet::Pops::LabelProvider
   def label_AccessExpression o            ; "'[]' expression"                   end
   def label_MatchExpression o             ; "'#{o.operator}' expression"        end
   def label_CollectExpression o           ; label(o.query)                      end
+  def label_EppExpression o               ; "Epp Template"                      end
   def label_ExportedQuery o               ; "Exported Query"                    end
   def label_VirtualQuery o                ; "Virtual Query"                     end
   def label_QueryExpression o             ; "Collect Query"                     end
@@ -49,8 +50,10 @@ class Puppet::Pops::Model::ModelLabelProvider < Puppet::Pops::LabelProvider
   def label_VariableExpression o          ; "Variable"                          end
   def label_TextExpression o              ; "Expression in Interpolated String" end
   def label_UnaryMinusExpression o        ; "Unary Minus"                       end
+  def label_UnfoldExpression o            ; "Unfold"                            end
   def label_BlockExpression o             ; "Block Expression"                  end
   def label_ConcatenatedString o          ; "Double Quoted String"              end
+  def label_HeredocExpression o           ; "'@(#{o.syntax})' expression"       end
   def label_HostClassDefinition o         ; "Host Class Definition"             end
   def label_NodeDefinition o              ; "Node Definition"                   end
   def label_ResourceTypeDefinition o      ; "'define' expression"               end
@@ -63,6 +66,8 @@ class Puppet::Pops::Model::ModelLabelProvider < Puppet::Pops::LabelProvider
   def label_CallMethodExpression o        ; "Method call"                       end
   def label_CaseExpression o              ; "'case' statement"                  end
   def label_CaseOption o                  ; "Case Option"                       end
+  def label_RenderStringExpression o      ; "Epp Text"                          end
+  def label_RenderExpression o            ; "Epp Interpolated Expression"       end
   def label_RelationshipExpression o      ; "'#{o.operator}' expression"        end
   def label_ResourceBody o                ; "Resource Instance Definition"      end
   def label_ResourceDefaultsExpression o  ; "Resource Defaults Expression"      end
@@ -80,6 +85,7 @@ class Puppet::Pops::Model::ModelLabelProvider < Puppet::Pops::LabelProvider
   def label_QualifiedName o               ; "Name"                              end
   def label_QualifiedReference o          ; "Type-Name"                         end
   def label_PAbstractType o               ; "#{Puppet::Pops::Types::TypeCalculator.string(o)}-Type" end
+  def label_ReservedWord o                ; "Reserved Word '#{o.word}'"         end
 
   def label_PResourceType o
     if o.title

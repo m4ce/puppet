@@ -2,7 +2,12 @@ require 'puppet/provider/package'
 
 # Packaging on OpenBSD.  Doesn't work anywhere else that I know of.
 Puppet::Type.type(:package).provide :openbsd, :parent => Puppet::Provider::Package do
-  desc "OpenBSD's form of `pkg_add` support."
+  desc "OpenBSD's form of `pkg_add` support.
+
+    This provider supports the `install_options` and `uninstall_options`
+    attributes, which allow command-line flags to be passed to pkg_add and pkg_delete.
+    These options should be specified as a string (e.g. '--flag'), a hash (e.g. {'--flag' => 'value'}),
+    or an array where each element is either a string or a hash."
 
   commands :pkginfo => "pkg_info", :pkgadd => "pkg_add", :pkgdelete => "pkg_delete"
 
@@ -141,32 +146,8 @@ Puppet::Type.type(:package).provide :openbsd, :parent => Puppet::Provider::Packa
     join_options(resource[:uninstall_options])
   end
 
-  # Turns a array of options into flags to be passed to pkg_add(8) and
-  # pkg_delete(8). The options can be passed as a string or hash. Note
-  # that passing a hash should only be used in case -Dfoo=bar must be passed,
-  # which can be accomplished with:
-  #     install_options => [ { '-Dfoo' => 'bar' } ]
-  # Regular flags like '-L' must be passed as a string.
-  # @param options [Array]
-  # @return Concatenated list of options
-  # @api private
-  def join_options(options)
-    return unless options
-
-    options.collect do |val|
-      case val
-      when Hash
-        val.keys.sort.collect do |k|
-          "#{k}=#{val[k]}"
-        end.join(' ')
-      else
-        val
-      end
-    end
-  end
-
   def uninstall
-    pkgdelete uninstall_options.flatten.compact.join(' '), @resource[:name]
+    pkgdelete uninstall_options.flatten.compact, @resource[:name]
   end
 
   def purge

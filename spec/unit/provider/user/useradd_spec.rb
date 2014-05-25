@@ -25,17 +25,16 @@ describe Puppet::Type.type(:user).provider(:useradd) do
 
   let(:shadow_entry) {
     return unless Puppet.features.libshadow?
-    Struct::PasswdEntry.new(
-      'myuser', # login name
-      '$6$FvW8Ib8h$qQMI/CR9m.QzIicZKutLpBgCBBdrch1IX0rTnxuI32K1pD9.RXZrmeKQlaC.RzODNuoUtPPIyQDufunvLOQWF0', # encrypted password
-      15573, # date of last password change
-      10,    # minimum password age
-      20,    # maximum password age
-      7,     # password warning period
-      -1,    # password inactivity period
-      15706, # account expiration date
-      -1     # reserved field
-    )
+    entry = Struct::PasswdEntry.new
+    entry[:sp_namp]   = 'myuser' # login name
+    entry[:sp_pwdp]   = '$6$FvW8Ib8h$qQMI/CR9m.QzIicZKutLpBgCBBdrch1IX0rTnxuI32K1pD9.RXZrmeKQlaC.RzODNuoUtPPIyQDufunvLOQWF0' # encrypted password
+    entry[:sp_lstchg] = 15573    # date of last password change
+    entry[:sp_min]    = 10       # minimum password age
+    entry[:sp_max]    = 20       # maximum password age
+    entry[:sp_warn]   = 7        # password warning period
+    entry[:sp_inact]  = -1       # password inactivity period
+    entry[:sp_expire] = 15706    # account expiration date
+    entry
   }
 
   describe "#create" do
@@ -124,6 +123,13 @@ describe Puppet::Type.type(:user).provider(:useradd) do
         provider.expects(:execute).with(all_of(includes('/usr/sbin/luseradd'), Not(includes('-e'))), has_entry(:custom_environment, has_key('LIBUSER_CONF')))
         provider.expects(:execute).with(all_of(includes('/usr/sbin/usermod'), includes('-e')))
         provider.create
+      end
+
+      it "should use userdel to delete users" do
+        resource[:ensure] = :absent
+        provider.stubs(:exists?).returns(true)
+        provider.expects(:execute).with(includes('/usr/sbin/userdel'))
+        provider.delete
       end
     end
 

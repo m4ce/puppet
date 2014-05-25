@@ -5,14 +5,15 @@ Puppet::Type.type(:package).provide :rpm, :source => :rpm, :parent => Puppet::Pr
   desc "RPM packaging support; should work anywhere with a working `rpm`
     binary.
 
-    This provider supports the `install_options` attribute, which allows
-    command-line flags to be passed to the RPM binary. Install options should be
-    specified as an array, where each element is either a string or a
-    `{'--flag' => 'value'}` hash. (That hash example would be equivalent to a
-    `'--flag=value'` string; the hash syntax is available as a convenience.)"
+    This provider supports the `install_options` and `uninstall_options`
+    attributes, which allow command-line flags to be passed to rpm.
+    These options should be specified as a string (e.g. '--flag'), a hash (e.g. {'--flag' => 'value'}),
+    or an array where each element is either a string or a hash."
 
   has_feature :versionable
   has_feature :install_options
+  has_feature :uninstall_options
+  has_feature :virtual_packages
 
   # Note: self:: is required here to keep these constants in the context of what will
   # eventually become this Puppet::Type::Package::ProviderRpm class.
@@ -75,13 +76,22 @@ Puppet::Type.type(:package).provide :rpm, :source => :rpm, :parent => Puppet::Pr
     #NOTE: Prior to a fix for issue 1243, this method potentially returned a cached value
     #IF YOU CALL THIS METHOD, IT WILL CALL RPM
     #Use get(:property) to check if cached values are available
-    cmd = ["-q", '--whatprovides',  @resource[:name], "#{self.class.nosignature}", "#{self.class.nodigest}", "--qf", self.class::NEVRA_FORMAT]
+    cmd = ["-q",  @resource[:name], "#{self.class.nosignature}", "#{self.class.nodigest}", "--qf", self.class::NEVRA_FORMAT]
 
     begin
       output = rpm(*cmd)
     rescue Puppet::ExecutionFailure
+      return nil unless @resource.allow_virtual?
+
       # rpm -q exits 1 if package not found
-      return nil
+      # retry the query for virtual packages
+      cmd << '--whatprovides'
+      begin
+        output = rpm(*cmd)
+      rescue Puppet::ExecutionFailure
+        # couldn't find a virtual package either
+        return nil
+      end
     end
     # FIXME: We could actually be getting back multiple packages
     # for multilib and this will only return the first such package
@@ -102,7 +112,6 @@ Puppet::Type.type(:package).provide :rpm, :source => :rpm, :parent => Puppet::Pr
   end
 
   def install
-    source = nil
     unless source = @resource[:source]
       @resource.fail "RPMs must specify a package source"
     end
@@ -115,8 +124,7 @@ Puppet::Type.type(:package).provide :rpm, :source => :rpm, :parent => Puppet::Pr
 
     flag = ["-i"]
     flag = ["-U", "--oldpackage"] if @property_hash[:ensure] and @property_hash[:ensure] != :absent
-
-    flag = flag + install_options
+    flag += install_options if resource[:install_options]
     rpm flag, source
   end
 
@@ -139,7 +147,10 @@ Puppet::Type.type(:package).provide :rpm, :source => :rpm, :parent => Puppet::Pr
         nvr += ".#{get(:arch)}"
       end
     end
-    rpm "-e", nvr
+
+    flag = ['-e']
+    flag += uninstall_options if resource[:uninstall_options]
+    rpm flag, nvr
   end
 
   def update
@@ -150,32 +161,11 @@ Puppet::Type.type(:package).provide :rpm, :source => :rpm, :parent => Puppet::Pr
     join_options(resource[:install_options])
   end
 
-  private
-
-  # Turns a array of options into flags to be passed to rpm install(8) and
-  # The options can be passed as a string or hash. Note that passing a hash
-  # should only be used in case -Dfoo=bar must be passed,
-  # which can be accomplished with:
-  #     install_options => [ { '-Dfoo' => 'bar' } ]
-  # Regular flags like '-L' must be passed as a string.
-  # @param options [Array]
-  # @return Concatenated list of options
-  # @api private
-  def join_options(options)
-    return [] unless options
-
-    options.collect do |val|
-      case val
-      when Hash
-        val.keys.sort.collect do |k|
-          "#{k}=#{val[k]}"
-        end.join(' ')
-      else
-        val
-      end
-    end
+  def uninstall_options
+    join_options(resource[:uninstall_options])
   end
 
+  private
   # @param line [String] one line of rpm package query information
   # @return [Hash] of NEVRA_FIELDS strings parsed from package info
   # or an empty hash if we failed to parse

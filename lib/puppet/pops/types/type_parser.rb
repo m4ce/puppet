@@ -30,7 +30,7 @@ class Puppet::Pops::Types::TypeParser
   #
   def parse(string)
     # TODO: This state (@string) can be removed since the parse result of newer future parser
-    # contains a Locator in its SourcePosAdapter and the Locator keeps the the string.
+    # contains a Locator in its SourcePosAdapter and the Locator keeps the string.
     # This way, there is no difference between a parsed "string" and something that has been parsed
     # earlier and fed to 'interpret'
     #
@@ -73,6 +73,10 @@ class Puppet::Pops::Types::TypeParser
 
   # @api private
   def interpret_LiteralString(o)
+    o.value
+  end
+
+  def interpret_LiteralRegularExpression(o)
     o.value
   end
 
@@ -180,6 +184,11 @@ class Puppet::Pops::Types::TypeParser
 
     when "struct"
       TYPES.struct()
+
+    when "callable"
+      # A generic callable as opposed to one that does not accept arguments
+      TYPES.all_callables()
+
     else
       TYPES.resource(name_ast.value)
     end
@@ -292,22 +301,22 @@ class Puppet::Pops::Types::TypeParser
 
     when "enum"
       # 1..m parameters being strings
-      raise_invalid_parameters_error("Enum", "1 or more", parameters.size) unless parameters.size > 1
+      raise_invalid_parameters_error("Enum", "1 or more", parameters.size) unless parameters.size >= 1
       TYPES.enum(*parameters)
 
     when "pattern"
       # 1..m parameters being strings or regular expressions
-      raise_invalid_parameters_error("Pattern", "1 or more", parameters.size) unless parameters.size > 1
+      raise_invalid_parameters_error("Pattern", "1 or more", parameters.size) unless parameters.size >= 1
       TYPES.pattern(*parameters)
 
     when "variant"
       # 1..m parameters being strings or regular expressions
-      raise_invalid_parameters_error("Variant", "1 or more", parameters.size) unless parameters.size > 1
+      raise_invalid_parameters_error("Variant", "1 or more", parameters.size) unless parameters.size >= 1
       TYPES.variant(*parameters)
 
     when "tuple"
       # 1..m parameters being types (last two optionally integer or literal default
-      raise_invalid_parameters_error("Tuple", "1 or more", parameters.size) unless parameters.size > 1
+      raise_invalid_parameters_error("Tuple", "1 or more", parameters.size) unless parameters.size >= 1
       length = parameters.size
       if TYPES.is_range_parameter?(parameters[-2])
         # min, max specification
@@ -328,6 +337,10 @@ class Puppet::Pops::Types::TypeParser
         TYPES.constrain_size(t, min, max)
       end
       t
+
+    when "callable"
+      # 1..m parameters being types (last three optionally integer or literal default, and a callable)
+      TYPES.callable(*parameters)
 
     when "struct"
       # 1..m parameters being types (last two optionally integer or literal default

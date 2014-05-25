@@ -17,6 +17,10 @@ describe provider_class do
     provider
   end
 
+  before :each do
+    resource.provider = provider
+  end
+
   describe "when installing" do
     it "should use the path to the gem" do
       provider_class.stubs(:command).with(:gemcmd).returns "/my/gem"
@@ -41,6 +45,17 @@ describe provider_class do
 
     it "should specify the package name" do
       provider.expects(:execute).with { |args| args[4] == "myresource" }.returns ""
+      provider.install
+    end
+
+    it "should not append install_options by default" do
+      provider.expects(:execute).with { |args| args.length == 5 }.returns ""
+      provider.install
+    end
+
+    it "should allow setting an install_options parameter" do
+      resource[:install_options] = [ '--force', {'--bindir' => '/usr/bin' } ]
+      provider.expects(:execute).with { |args| args[5] == '--force' && args[6] == '--bindir=/usr/bin' }.returns ''
       provider.install
     end
 
@@ -157,6 +172,16 @@ describe provider_class do
                    {:provider=>:gem, :ensure=>["2.9.0"], :name=>"rspec-mocks"},
                    {:provider=>:gem, :ensure=>["0.9.0"], :name=>"rubygems-bundler"},
                    {:provider=>:gem, :ensure=>["1.11.3.3"], :name=>"rvm"}]
+    end
+  end
+
+  describe "listing gems" do
+    describe "searching for a single package" do
+      it "searches for an exact match" do
+        provider_class.expects(:execute).with(includes('^bundler$')).returns(File.read(my_fixture('gem-list-single-package')))
+        expected = {:name => 'bundler', :ensure => %w[1.6.2], :provider => :gem}
+        expect(provider_class.gemlist({:justme => 'bundler'})).to eq(expected)
+      end
     end
   end
 end

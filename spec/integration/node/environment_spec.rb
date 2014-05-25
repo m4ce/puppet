@@ -29,7 +29,7 @@ describe Puppet::Node::Environment do
       mods["mod#{num}"] = a_module_in("mod#{num}", dir)
     end
 
-    environment = Puppet::Node::Environment.create(:foo, dirs, '')
+    environment = Puppet::Node::Environment.create(:foo, dirs)
 
     environment.modules.each do |mod|
       mod.environment.should == environment
@@ -49,7 +49,7 @@ describe Puppet::Node::Environment do
       a_module_in("mod", dir)
     end
 
-    environment = Puppet::Node::Environment.create(:foo, dirs, '')
+    environment = Puppet::Node::Environment.create(:foo, dirs)
 
     mods = environment.modules
     mods.length.should == 1
@@ -74,8 +74,8 @@ describe Puppet::Node::Environment do
 
       catalog = Puppet::Parser::Compiler.compile(node)
 
-      expect(catalog).to have_resource('Class[a]')
-      expect(catalog).to have_resource('Class[b]')
+      expect(catalog).to have_resource('Class[A]')
+      expect(catalog).to have_resource('Class[B]')
       expect(catalog).to have_resource('Notify[variables]').with_parameter(:message, "a: 10, b: 10")
     end
   end

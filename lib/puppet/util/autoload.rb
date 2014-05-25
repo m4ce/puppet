@@ -43,7 +43,7 @@ class Puppet::Util::Autoload
       name = cleanpath(name).chomp('.rb')
       return true unless loaded.include?(name)
       file, old_mtime = loaded[name]
-      environment = Puppet.lookup(:environments).get(Puppet[:environment])
+      environment = Puppet.lookup(:current_environment)
       return true unless file == get_file(name, environment)
       begin
         old_mtime.to_i != File.mtime(file).to_i
@@ -127,7 +127,7 @@ class Puppet::Util::Autoload
       # now we are accomplishing that by calling the
       # "app_defaults_initialized?" method on the main puppet Settings object.
       # --cprice 2012-03-16
-      if Puppet.settings.app_defaults_initialized?
+      if Puppet.settings.app_defaults_initialized? &&
         env ||= Puppet.lookup(:environments).get(Puppet[:environment])
 
         # if the app defaults have been initialized then it should be safe to access the module path setting.
@@ -195,8 +195,16 @@ class Puppet::Util::Autoload
     self.class.load_file(expand(name), env)
   end
 
-  # Load all instances that we can.  This uses require, rather than load,
-  # so that already-loaded files don't get reloaded unnecessarily.
+  # Load all instances from a path of Autoload.search_directories matching the
+  # relative path this Autoloader was initialized with.  For example, if we
+  # have created a Puppet::Util::Autoload for Puppet::Type::User with a path of
+  # 'puppet/provider/user', the search_directories path will be searched for
+  # all ruby files matching puppet/provider/user/*.rb and they will then be
+  # loaded from the first directory in the search path providing them.  So
+  # earlier entries in the search path may shadow later entries.
+  #
+  # This uses require, rather than load, so that already-loaded files don't get
+  # reloaded unnecessarily.
   def loadall
     self.class.loadall(@path)
   end

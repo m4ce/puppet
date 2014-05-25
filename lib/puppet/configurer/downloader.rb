@@ -30,10 +30,9 @@ class Puppet::Configurer::Downloader
   end
 
   def catalog
-    catalog = Puppet::Resource::Catalog.new
+    catalog = Puppet::Resource::Catalog.new("PluginSync", @environment)
     catalog.host_config = false
     catalog.add_resource(file)
-    catalog.environment = @environment
     catalog
   end
 
@@ -48,23 +47,25 @@ class Puppet::Configurer::Downloader
   require 'sys/admin' if Puppet.features.microsoft_windows?
 
   def default_arguments
-    {
+    defargs = {
       :path => path,
       :recurse => true,
       :source => source,
+      :source_permissions => :ignore,
       :tag => name,
       :purge => true,
       :force => true,
       :backup => false,
       :noop => false
-    }.merge(
-      Puppet.features.microsoft_windows? ? {
-        :source_permissions => :ignore
-      } :
-      {
-        :owner => Process.uid,
-        :group => Process.gid
-      }
-    )
+    }
+    if !Puppet.features.microsoft_windows?
+      defargs.merge!(
+        {
+          :owner => Process.uid,
+          :group => Process.gid
+        }
+      )
+    end
+    return defargs
   end
 end

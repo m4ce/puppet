@@ -1,6 +1,9 @@
 require 'rake/clean'
 require 'pp'
 require 'yaml'
+$LOAD_PATH << File.expand_path(File.join(File.dirname(__FILE__), 'lib'))
+require 'puppet/acceptance/git_utils'
+extend Puppet::Acceptance::GitUtils
 
 ONE_DAY_IN_SECS = 24 * 60 * 60
 REPO_CONFIGS_DIR = "repo-configs"
@@ -21,7 +24,8 @@ module HarnessOptions
     :xml => true,
     :timesync => true,
     :repo_proxy => true,
-    :add_el_extras => true,
+    :add_el_extras => false,
+    :preserve_hosts => 'onfail'
   }
 
   class Aggregator
@@ -66,12 +70,25 @@ module HarnessOptions
 end
 
 def beaker_test(mode = :packages, options = {})
-  final_options = HarnessOptions.options(mode, options)
+  delete_options = options[:__delete_options__] || []
+  final_options = HarnessOptions.options(mode,
+                                         options.reject { |k,v| k == :__delete_options__ })
 
   if mode == :git
-    puppet_fork = ENV['FORK'] || 'puppetlabs'
-    git_server  = ENV['GIT_SERVER'] || 'github.com'
-    final_options[:install] << "git://#{git_server}/#{puppet_fork}/puppet.git##{sha}"
+    # Build up project git urls based on git server and fork env variables or defaults
+    final_options[:install].map! do |install|
+      if md = /^(\w+)#(\w+)$/.match(install)
+        project, project_sha = md.captures
+        "#{build_giturl(project)}##{project_sha}"
+      elsif md = /^(\w+)$/.match(install)
+        project = md[1]
+        "#{build_giturl(project)}##{sha}"
+      end
+    end
+  end
+
+  delete_options.each do |delete_me|
+    final_options.delete(delete_me)
   end
 
   options_file = 'merged_options.rb'
@@ -83,7 +100,7 @@ EOS
     merged.puts(final_options.pretty_inspect)
   end
 
-  tests = ENV['TESTS'] || ENV['TEST'] 
+  tests = ENV['TESTS'] || ENV['TEST']
   tests_opt = "--tests=#{tests}" if tests
 
   config_opt = "--hosts=#{config}" if config
@@ -95,12 +112,16 @@ EOS
   begin
     sh("beaker", *args)
   ensure
-    if (hosts_file = config || final_options[:hosts_file]) && hosts_file !~ /preserved_config/
-      cp(hosts_file, "log/latest/config.yml")
-      generate_config_for_latest_hosts if final_options[:preserve_hosts] || overriding_options =~ /--preserve-hosts/
-    end
-    mv(options_file, "log/latest")
+    preserve_configuration(final_options, options_file)
   end
+end
+
+def preserve_configuration(final_options, options_file)
+  if (hosts_file = config || final_options[:hosts_file]) && hosts_file !~ /preserved_config/
+    cp(hosts_file, "log/latest/config.yml")
+    generate_config_for_latest_hosts
+  end
+  mv(options_file, "log/latest")
 end
 
 def generate_config_for_latest_hosts
@@ -157,7 +178,7 @@ def list_preserved_hosts(secs_ago = ONE_DAY_IN_SECS)
     File.open(log, 'r') do |file|
       if file.ctime > yesterday
         file.each_line do |line|
-          matchdata = /^(\w+) \(.*?\) \$/.match(line.encode!('UTF-8', 'UTF-8', :invalid => :replace))
+          matchdata = /^(\w+) \(.*?\) \d\d:\d\d:\d\d\$/.match(line.encode!('UTF-8', 'UTF-8', :invalid => :replace))
           hosts.add(matchdata[1]) if matchdata
         end
       end
@@ -166,41 +187,19 @@ def list_preserved_hosts(secs_ago = ONE_DAY_IN_SECS)
   hosts
 end
 
-# Plagiarized from Beaker::Vcloud#cleanup
-def destroy_preserved_hosts(hosts = nil, secs_ago = ONE_DAY_IN_SECS)
+def release_hosts(hosts = nil, secs_ago = ONE_DAY_IN_SECS)
   secs_ago ||= ONE_DAY_IN_SECS
   hosts ||= list_preserved_hosts(secs_ago)
 
-  require 'beaker/hypervisor/vsphere_helper'
-  vsphere_credentials = VsphereHelper.load_config("#{ENV['HOME']}/.fog")
-
-  puts "Connecting to vSphere at #{vsphere_credentials[:server]}" +
-    " with credentials for #{vsphere_credentials[:user]}"
-
-  vsphere_helper = VsphereHelper.new( vsphere_credentials )
-
-  vm_names = hosts.to_a
-  pp vm_names
-  vms = vsphere_helper.find_vms vm_names
-  vm_names.each do |name|
-    unless vm = vms[name]
-      puts "Couldn't find VM #{name} in vSphere!"
-      next
-    end
-
-    if vm.runtime.powerState == 'poweredOn'
-      puts "Shutting down #{vm.name}"
-      start = Time.now
-      vm.PowerOffVM_Task.wait_for_completion
-      puts "Spent %.2f seconds halting #{vm.name}" % (Time.now - start)
-    end
-
-    start = Time.now
-    vm.Destroy_Task
-    puts "Spent %.2f seconds destroying #{vm.name}" % (Time.now - start)
-  end
-
-  vsphere_helper.close
+  require 'beaker'
+  vcloud_pooled = Beaker::VcloudPooled.new(hosts.map { |h| { 'vmhostname' => h } },
+                              :logger => Beaker::Logger.new,
+                              :dot_fog => "#{ENV['HOME']}/.fog",
+                              'pooling_api' => 'http://vcloud.delivery.puppetlabs.net' ,
+                              'datastore' => 'not-used',
+                              'resourcepool' => 'not-used',
+                              'folder' => 'not-used')
+  vcloud_pooled.cleanup
 end
 
 def print_preserved(preserved)
@@ -236,8 +235,9 @@ Requires commit SHA to be put under test as environment variable: SHA='<sha>'.
 Also must set CONFIG=config/nodes/foo.yaml or include it in an options.rb for Beaker.
 You may set TESTS=path/to/test,and/more/tests.
 You may set additional Beaker OPTIONS='--more --options'
-If testing from git checkouts, you may optionally set the github fork to checkout from using FORK='other-puppet-fork'.
-You may also optionally set the git server to checkout from using GIT_SERVER='my.host.with.git.daemon', if you have set up a `git daemon` to pull local commits from.  (In this case, the FORK should be set to the path to the repository, and you will need to allow the git daemon to serve the repo (see `git help daemon`)).
+If testing from git checkouts, you may optionally set the github fork to checkout from using PUPPET_FORK='some-other-puppet-fork' (you may change the HIERA_FORK and FACTER_FORK as well if you wish).
+You may also optionally set the git server to checkout repos from using GIT_SERVER='some.git.mirror'.
+Or you may set PUPPET_GIT_SERVER='my.host.with.git.daemon', specifically, if you have set up a `git daemon` to pull local commits from.  (You will need to allow the git daemon to serve the repo (see `git help daemon` and the docs/acceptance_tests.md for more details)).
 If there is a Beaker options hash in a ./local_options.rb, it will be included.  Commandline options set through the above environment variables will override settings in this file.
 EOS
 
@@ -269,7 +269,7 @@ Defaults to a packages run, but you can set it to 'git' with TYPE='git'.
 #{USAGE}
   EOS
   task :test_and_preserve_hosts => 'ci:check_env'  do
-    beaker_test(beaker_run_type, :preserve_hosts => true)
+    beaker_test(beaker_run_type, :preserve_hosts => 'always')
   end
 
   desc "List acceptance runs from the past day which had hosts preserved."
@@ -283,19 +283,19 @@ Shutdown and destroy any hosts that we have preserved for testing.  These should
 Specify a list of comma separated HOST_NAMES if you have a set of dynamic vcloud host names you want to purge outside of what can be grepped from the logs.
 You can go back through the last SECS_AGO logs.  Default is one day ago in secs.
   EOS
-  task :destroy_preserved_hosts do
+  task :release_hosts do
     host_names = ENV['HOST_NAMES'].split(',') if ENV['HOST_NAMES']
     secs_ago = ENV['SECS_AGO']
-    destroy_preserved_hosts(host_names, secs_ago)
+    release_hosts(host_names, secs_ago)
+  end
+
+  task :destroy_preserved_hosts => 'ci:release_hosts' do
+    puts "Note: we are now releasing hosts back to the vcloud pooling api rather than destroying them directly.  The rake task for this is ci:release_hosts"
   end
 
   desc <<-EOS
 Rerun an acceptance test using the last captured preserved_config.yaml to skip provisioning.
 Or specify a CONFIG_NUMBER from `rake ci:list_preserved`.
-Uses the setup/rsync/pre-suite to rsync the local puppet source onto master and agent.
-You may specify an RSYNC_FILTER_FILE as well.
-You may skip purgeing and reinstalling puppet packages by including SKIP_PACKAGE_REINSTALL.
-You may skip rsyncing local puppet files over to the tests hosts by including SKIP_RSYNC.
 Defaults to a packages run, but you can set it to 'git' with TYPE='git'.
   EOS
   task :test_against_preserved_hosts do
@@ -307,12 +307,16 @@ Defaults to a packages run, but you can set it to 'git' with TYPE='git'.
     beaker_test(beaker_run_type,
       :hosts_file => "#{config_path}/preserved_config.yaml",
       :no_provision => true,
-      :preserve_hosts => true,
-      :pre_suite => ['setup/rsync/pre-suite']
+      :preserve_hosts => 'always',
+      :__delete_options__ => [:pre_suite]
     )
   end
 end
 
 task :default do
   sh('rake -T')
+end
+
+task :spec do
+  sh('rspec lib')
 end

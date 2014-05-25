@@ -189,6 +189,9 @@ module Puppet
         * Mac OS X 10.7 (Lion) uses salted SHA512 hashes. The Puppet Labs [stdlib][]
           module contains a `str2saltedsha512` function which can generate password
           hashes for Lion.
+        * Mac OS X 10.8 and higher use salted SHA512 PBKDF2 hashes. When
+          managing passwords on these systems the salt and iterations properties
+          need to be specified as well as the password.
         * Windows passwords can only be managed in cleartext, as there is no Windows API
           for setting the password hash.
 
@@ -544,13 +547,13 @@ module Puppet
 
     newproperty(:salt, :required_features => :manages_password_salt) do
       desc "This is the 32 byte salt used to generate the PBKDF2 password used in
-            OS X"
+            OS X. This field is required for managing passwords on OS X >= 10.8."
     end
 
     newproperty(:iterations, :required_features => :manages_password_salt) do
       desc "This is the number of iterations of a chained computation of the
             password hash (http://en.wikipedia.org/wiki/PBKDF2).  This parameter
-            is used in OS X"
+            is used in OS X. This field is required for managing passwords on OS X >= 10.8."
 
       munge do |value|
         if value.is_a?(String) and value =~/^[-0-9]+$/
@@ -567,6 +570,117 @@ module Puppet
       desc "Forces the mangement of local accounts when accounts are also
             being managed by some other NSS"
       defaultto false
+    end
+
+    def eval_generate
+      return [] if self[:purge_ssh_keys].empty?
+      find_unmanaged_keys
+    end
+
+    newparam(:purge_ssh_keys) do
+      desc "Whether to purge authorized SSH keys for this user if they are not managed
+        with the `ssh_authorized_key` resource type. Allowed values are:
+
+        * `false` (default) --- don't purge SSH keys for this user.
+        * `true` --- look for keys in the `.ssh/authorized_keys` file in the user's
+          home directory. Purge any keys that aren't managed as `ssh_authorized_key`
+          resources.
+        * An array of file paths --- look for keys in all of the files listed. Purge
+          any keys that aren't managed as `ssh_authorized_key` resources. If any of
+          these paths starts with `~` or `%h`, that token will be replaced with
+          the user's home directory."
+
+      defaultto :false
+
+      # Use Symbols instead of booleans until PUP-1967 is resolved.
+      newvalues(:true, :false)
+
+      validate do |value|
+        if [ :true, :false ].include? value.to_s.intern
+          return
+        end
+        value = [ value ] if value.is_a?(String)
+        if value.is_a?(Array)
+          value.each do |entry|
+
+            raise ArgumentError, "Each entry for purge_ssh_keys must be a string, not a #{entry.class}" unless entry.is_a?(String)
+
+            valid_home = Puppet::Util.absolute_path?(entry) || entry =~ %r{^~/|^%h/}
+            raise ArgumentError, "Paths to keyfiles must be absolute, not #{entry}" unless valid_home
+          end
+          return
+        end
+        raise ArgumentError, "purge_ssh_keys must be true, false, or an array of file names, not #{value.inspect}"
+      end
+
+      munge do |value|
+        # Resolve string, boolean and symbol forms of true and false to a
+        # single representation.
+        test_sym = value.to_s.intern
+        value = test_sym if [:true, :false].include? test_sym
+
+        return [] if value == :false
+        home = resource[:home]
+        if value == :true and not home
+          raise ArgumentError, "purge_ssh_keys can only be true for users with a defined home directory"
+        end
+
+        return [ "#{home}/.ssh/authorized_keys" ] if value == :true
+        # value is an array - munge each value
+        [ value ].flatten.map do |entry|
+          if entry =~ /^~|^%h/ and not home
+            raise ArgumentError, "purge_ssh_keys value '#{value}' meta character ~ or %h only allowed for users with a defined home directory"
+          end
+          entry.gsub!(/^~\//, "#{home}/")
+          entry.gsub!(/^%h\//, "#{home}/")
+          entry
+        end
+      end
+    end
+
+    # Generate ssh_authorized_keys resources for purging. The key files are
+    # taken from the purge_ssh_keys parameter. The generated resources inherit
+    # all metaparameters from the parent user resource.
+    #
+    # @return [Array<Puppet::Type::Ssh_authorized_key] a list of resources
+    #   representing the found keys
+    # @see eval_generate
+    # @api private
+    def find_unmanaged_keys
+      self[:purge_ssh_keys].
+        select { |f| File.readable?(f) }.
+        map { |f| unknown_keys_in_file(f) }.
+        flatten.each do |res|
+          res[:ensure] = :absent
+          @parameters.each do |name, param|
+            res[name] = param.value if param.metaparam?
+          end
+        end
+    end
+
+    # Parse an ssh authorized keys file superficially, extract the comments
+    # on the keys. These are considered names of possible ssh_authorized_keys
+    # resources. Keys that are managed by the present catalog are ignored.
+    #
+    # @see eval_generate
+    # @api private
+    # @return [Array<Puppet::Type::Ssh_authorized_key] a list of resources
+    #   representing the found keys
+    def unknown_keys_in_file(keyfile)
+      names = []
+      File.new(keyfile).each do |line|
+        next if line.strip.empty?
+        next if line =~ /^\s*#/
+        names << line.strip.split.last
+      end
+
+      names.map { |keyname|
+        Puppet::Type.type(:ssh_authorized_key).new(
+          :name => keyname,
+          :target => keyfile)
+      }.reject { |res|
+        catalog.resource_refs.include? res.ref
+      }
     end
   end
 end

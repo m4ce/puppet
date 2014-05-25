@@ -109,6 +109,30 @@ describe Puppet::Type.type(:cron).provider(:crontab), '(integration)', :unless =
     end
 
     describe "with ensure present" do
+
+      context "and no command specified" do
+        it "should work if the resource is already present" do
+          resource = Puppet::Type.type(:cron).new(
+            :name    => 'My daily failure',
+            :special => 'daily',
+            :target  => crontab_user1,
+            :user    => crontab_user1
+          )
+          run_in_catalog(resource)
+          expect_output('crontab_user1')
+        end
+        it "should fail if the resource needs creating" do
+          resource = Puppet::Type.type(:cron).new(
+            :name    => 'Entirely new resource',
+            :special => 'daily',
+            :target  => crontab_user1,
+            :user    => crontab_user1
+          )
+          resource.expects(:err).with(regexp_matches(/no command/))
+          run_in_catalog(resource)
+        end
+      end
+
       it "should do nothing if entry already present" do
         resource = Puppet::Type.type(:cron).new(
           :name    => 'My daily failure',
@@ -116,6 +140,17 @@ describe Puppet::Type.type(:cron).provider(:crontab), '(integration)', :unless =
           :command => '/bin/false',
           :target  => crontab_user1,
           :user    => crontab_user1
+        )
+        run_in_catalog(resource)
+        expect_output('crontab_user1')
+      end
+
+      it "should work correctly when managing 'target' but not 'user'" do
+        resource = Puppet::Type.type(:cron).new(
+          :name    => 'My daily failure',
+          :special => 'daily',
+          :command => '/bin/false',
+          :target  => crontab_user1
         )
         run_in_catalog(resource)
         expect_output('crontab_user1')

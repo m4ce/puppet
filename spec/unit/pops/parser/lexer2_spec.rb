@@ -21,7 +21,7 @@ describe 'Lexer2' do
   include EgrammarLexer2Spec
 
   {
-    :LBRACK => '[',
+    :LISTSTART => '[',
     :RBRACK => ']',
     :LBRACE => '{',
     :RBRACE => '}',
@@ -69,6 +69,10 @@ describe 'Lexer2' do
     end
   end
 
+  it "should lex [ in position after non whitespace as LBRACK" do
+    tokens_scanned_from("a[").should match_tokens2(:NAME, :LBRACK)
+  end
+
   {
     "case"     => :CASE,
     "class"    => :CLASS,
@@ -104,6 +108,32 @@ describe 'Lexer2' do
   [ 'a', 'a::b', '::a', '::a::b',].each do |string|
     it "should lex a NAME on the form '#{string}'" do
       tokens_scanned_from(string).should match_tokens2([:NAME, string])
+    end
+  end
+
+  [ 'a-b', 'a--b', 'a-b-c', '_x'].each do |string|
+    it "should lex a BARE WORD STRING on the form '#{string}'" do
+      tokens_scanned_from(string).should match_tokens2([:WORD, string])
+    end
+  end
+
+  [ '_x::y', 'x::_y'].each do |string|
+    it "should consider the bare word '#{string}' to be a bad NAME" do
+      expect {
+        tokens_scanned_from(string)
+      }.to raise_error(/Illegal fully qualified name/)
+    end
+  end
+
+  { '-a'   =>      [:MINUS, :NAME],
+    '--a'  =>      [:MINUS, :MINUS, :NAME],
+    'a-'   =>      [:NAME, :MINUS],
+    'a- b'   =>    [:NAME, :MINUS, :NAME],
+    'a--'  =>      [:NAME, :MINUS, :MINUS],
+    'a-$3' =>      [:NAME, :MINUS, :VARIABLE],
+  }.each do |source, expected|
+    it "should lex leading and trailing hyphens from #{source}" do
+      tokens_scanned_from(source).should match_tokens2(*expected)
     end
   end
 
@@ -146,7 +176,14 @@ describe 'Lexer2' do
   { "''"      => '',
     "'a'"     => 'a',
     "'a\\'b'" =>"a'b",
-    "'a\\r\\n\\t\\s\\$\\\"\\\\b'" => "a\\r\\n\\t\\s\\$\\\"\\\\b"
+    "'a\\rb'" =>"a\\rb",
+    "'a\\nb'" =>"a\\nb",
+    "'a\\tb'" =>"a\\tb",
+    "'a\\sb'" =>"a\\sb",
+    "'a\\$b'" =>"a\\$b",
+    "'a\\\"b'" =>"a\\\"b",
+    "'a\\\\b'" =>"a\\b",
+    "'a\\\\'" =>"a\\",
   }.each do |source, expected|
     it "should lex a single quoted STRING on the form #{source}" do
       tokens_scanned_from(source).should match_tokens2([:STRING, expected])
@@ -183,9 +220,20 @@ describe 'Lexer2' do
     end
   end
 
+  { '"$"'      => '$',
+    '"a$"'     => 'a$',
+    '"a$%b"'  => "a$%b",
+    '"a$$"'  => "a$$",
+    '"a$$%"'  => "a$$%",
+  }.each do |source, expected|
+    it "should lex interpolation including false starts #{source}" do
+      tokens_scanned_from(source).should match_tokens2([:STRING, expected])
+    end
+  end
+
   it "differentiates between foo[x] and foo [x] (whitespace)" do
     tokens_scanned_from("$a[1]").should match_tokens2(:VARIABLE, :LBRACK, :NUMBER, :RBRACK)
-    tokens_scanned_from("$a [1]").should match_tokens2(:VARIABLE, :LBRACK, :NUMBER, :RBRACK)
+    tokens_scanned_from("$a [1]").should match_tokens2(:VARIABLE, :LISTSTART, :NUMBER, :RBRACK)
     tokens_scanned_from("a[1]").should match_tokens2(:NAME, :LBRACK, :NUMBER, :RBRACK)
     tokens_scanned_from("a [1]").should match_tokens2(:NAME, :LISTSTART, :NUMBER, :RBRACK)
     tokens_scanned_from(" if \n\r\t\nif if ").should match_tokens2(:IF, :IF, :IF)
@@ -213,7 +261,9 @@ describe 'Lexer2' do
     "!~" => [:NOMATCH, "!~ /./"],
     ","  => [:COMMA, ", /./"],
     "("  => [:LPAREN, "( /./"],
-    "["  => [:LBRACK, "[ /./"],
+    "["  => [:LISTSTART, "[ /./"],
+    "["  => [[:NAME, :LBRACK], "a[ /./"],
+    "["  => [[:NAME, :LISTSTART], "a [ /./"],
     "{"  => [:LBRACE, "{ /./"],
     "+"  => [:PLUS, "+ /./"],
     "-"  => [:MINUS, "- /./"],
@@ -221,7 +271,8 @@ describe 'Lexer2' do
     ";"  => [:SEMIC, "; /./"],
   }.each do |token, entry|
     it "should lex regexp after '#{token}'" do
-      tokens_scanned_from(entry[1]).should match_tokens2(entry[0], :REGEX)
+      expected = [entry[0], :REGEX].flatten
+      tokens_scanned_from(entry[1]).should match_tokens2(*expected)
     end
   end
 
@@ -271,7 +322,7 @@ describe 'Lexer2' do
       Tex\\tt\\n
       |- END
       CODE
-      tokens_scanned_from(code).should match_tokens2([:HEREDOC, 'syntax'], [:STRING, "Tex\tt\\n"])
+      tokens_scanned_from(code).should match_tokens2([:HEREDOC, 'syntax'], :SUBLOCATE, [:STRING, "Tex\tt\\n"])
     end
 
     it 'lexes "tag", syntax and escapes, margin, right trim and interpolation' do
@@ -282,6 +333,7 @@ describe 'Lexer2' do
       CODE
       tokens_scanned_from(code).should match_tokens2(
         [:HEREDOC, 'syntax'],
+        :SUBLOCATE,
         [:DQPRE, "Tex\tt\\n"],
         [:VARIABLE, "var"],
         [:DQPOST, " After"]
@@ -307,7 +359,7 @@ describe 'Lexer2' do
       code = <<-CODE
       This is just text
       CODE
-      epp_tokens_scanned_from(code).should match_tokens2([:RENDER_STRING, "      This is just text\n"])
+      epp_tokens_scanned_from(code).should match_tokens2(:EPP_START, [:RENDER_STRING, "      This is just text\n"])
     end
 
     it 'epp can contain text with interpolated rendered expressions' do
@@ -315,10 +367,26 @@ describe 'Lexer2' do
       This is <%= $x %> just text
       CODE
       epp_tokens_scanned_from(code).should match_tokens2(
+      :EPP_START,
       [:RENDER_STRING, "      This is "],
       [:RENDER_EXPR, nil],
       [:VARIABLE, "x"],
+      [:EPP_END, "%>"],
       [:RENDER_STRING, " just text\n"]
+      )
+    end
+
+    it 'epp can contain text with trimmed interpolated rendered expressions' do
+      code = <<-CODE
+      This is <%= $x -%> just text
+      CODE
+      epp_tokens_scanned_from(code).should match_tokens2(
+      :EPP_START,
+      [:RENDER_STRING, "      This is "],
+      [:RENDER_EXPR, nil],
+      [:VARIABLE, "x"],
+      [:EPP_END_TRIM, "-%>"],
+      [:RENDER_STRING, "just text\n"]
       )
     end
 
@@ -327,6 +395,7 @@ describe 'Lexer2' do
       This is <% $x=10 %> just text
       CODE
       epp_tokens_scanned_from(code).should match_tokens2(
+      :EPP_START,
       [:RENDER_STRING, "      This is "],
       [:VARIABLE, "x"],
       :EQUALS,
@@ -341,6 +410,7 @@ describe 'Lexer2' do
       just text
       CODE
       epp_tokens_scanned_from(code).should match_tokens2(
+      :EPP_START,
       [:RENDER_STRING, "      This is "],
       [:VARIABLE, "x"],
       :EQUALS,
@@ -356,6 +426,7 @@ describe 'Lexer2' do
       just text
       CODE
       epp_tokens_scanned_from(code).should match_tokens2(
+      :EPP_START,
       [:RENDER_STRING, "      This is "],
       [:VARIABLE, "x"],
       :EQUALS,
@@ -370,6 +441,7 @@ describe 'Lexer2' do
       <%% this is escaped epp %%>
       CODE
       epp_tokens_scanned_from(code).should match_tokens2(
+      :EPP_START,
       [:RENDER_STRING, "      This is "],
       [:VARIABLE, "x"],
       :EQUALS,

@@ -33,6 +33,9 @@ module Puppet::Pops::Adapters
     end
 
     def locator
+      # The locator is always the parent locator, all positioned objects are positioned within their
+      # parent. If a positioned object also has a locator that locator is for its children!
+      #
       @locator ||= find_locator(@adapted.eContainer)
     end
 
@@ -40,8 +43,13 @@ module Puppet::Pops::Adapters
       if o.nil?
         raise ArgumentError, "InternalError: SourcePosAdapter for something that has no locator among parents"
       end
-      return o.locator if o.is_a?(Puppet::Pops::Model::Program)
-      if adapter = self.class.get(o)
+      case
+      when o.is_a?(Puppet::Pops::Model::Program)
+        return o.locator
+      # TODO_HEREDOC use case of SubLocator instead
+      when o.is_a?(Puppet::Pops::Model::SubLocatedExpression) && !(found_locator = o.locator).nil?
+        return found_locator
+      when adapter = self.class.get(o)
         return adapter.locator
       else
         find_locator(o.eContainer)
@@ -75,6 +83,13 @@ module Puppet::Pops::Adapters
     def extract_text
       locator.string.slice(offset, length)
     end
+
+    # Produces an URI with path?line=n&pos=n. If origin is unknown the URI is string:?line=n&pos=n
+    def to_uri
+      f = locator.file
+      f = 'string:' if f.nil? || f.empty?
+      URI("#{f}?line=#{line.to_s}&pos=#{pos.to_s}")
+    end
   end
 
   # A LoaderAdapter adapts an object with a {Puppet::Pops::Loader}. This is used to make further loading from the
@@ -87,7 +102,7 @@ module Puppet::Pops::Adapters
   # @see Puppet::Pops::Utils#find_adapter
   #
   class LoaderAdapter < Puppet::Pops::Adaptable::Adapter
-    # @return [Puppet::Pops::Loader] the loader
+    # @return [Puppet::Pops::Loader::Loader] the loader
     attr_accessor :loader
   end
 end

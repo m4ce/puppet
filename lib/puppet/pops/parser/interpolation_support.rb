@@ -44,8 +44,9 @@ module Puppet::Pops::Parser::InterpolationSupport
           break
         else
           # false $ variable start
-          text += value
+          text += terminator
           value,terminator = slurp_dqstring()
+          text += value
           after = scn.pos
         end
       end
@@ -84,8 +85,9 @@ module Puppet::Pops::Parser::InterpolationSupport
           break
         else
           # false $ variable start
+          text += terminator
+          value,terminator = slurp_dqstring
           text += value
-          value,terminator = self.send(slurpfunc)
           after = scn.pos
         end
       end
@@ -127,8 +129,9 @@ module Puppet::Pops::Parser::InterpolationSupport
           break
         else
           # false $ variable start
-          text += value
+          text += terminator
           value,terminator = slurp_uqstring()
+          text += value
           after = scn.pos
         end
       end
@@ -166,8 +169,9 @@ module Puppet::Pops::Parser::InterpolationSupport
           break
         else
           # false $ variable start
-          text += value
+          text += terminator
           value,terminator = slurp_uqstring
+          text += value
           after = scn.pos
         end
       end
@@ -204,7 +208,7 @@ module Puppet::Pops::Parser::InterpolationSupport
 
   def transform_to_variable(token)
     token_name = token[0]
-    if [:NUMBER, :NAME].include?(token_name) || self.class::KEYWORD_NAMES[token_name]
+    if [:NUMBER, :NAME, :WORD].include?(token_name) || self.class::KEYWORD_NAMES[token_name]
       t = token[1]
       ta = t.token_array
       [:VARIABLE, self.class::TokenValue.new([:VARIABLE, ta[1], ta[2]], t.offset, t.locator)]

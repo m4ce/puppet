@@ -146,6 +146,10 @@ class Puppet::Pops::Parser::Parser
     factory.record_position(start_locateable, end_locateable)
   end
 
+  def heredoc_loc(factory, start_locateabke, end_locateable = nil)
+    factory.record_heredoc_position(start_locatable, end_locatable)
+  end
+
   # Associate documentation with the factory wrapped model object.
   # @return [Puppet::Pops::Model::Factory] the given factory
   # @api private
@@ -180,6 +184,11 @@ class Puppet::Pops::Parser::Parser
   #
   def transform_calls(expressions)
     Factory.transform_calls(expressions)
+  end
+
+  # Transforms a LEFT followed by the result of attribute_operations, this may be a call or an invalid sequence
+  def transform_resource_wo_title(left, resource)
+    Factory.transform_resource_wo_title(left, resource)
   end
 
   # If there are definitions that require initialization a Program is produced, else the body

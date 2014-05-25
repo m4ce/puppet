@@ -23,7 +23,7 @@ class Puppet::Resource::Catalog::Compiler < Puppet::Indirector::Code
       if text_facts.is_a?(Puppet::Node::Facts)
         facts = text_facts
       else
-        # We unescape here because the corrosponding code in Puppet::Configurer::FactHandler escapes
+        # We unescape here because the corresponding code in Puppet::Configurer::FactHandler escapes
         facts = Puppet::Node::Facts.convert_from(format, CGI.unescape(text_facts))
       end
 
@@ -32,7 +32,13 @@ class Puppet::Resource::Catalog::Compiler < Puppet::Indirector::Code
       end
 
       facts.add_timestamp
-      Puppet::Node::Facts.indirection.save(facts)
+
+      options = {
+        :environment => request.environment,
+        :transaction_uuid => request.options[:transaction_uuid],
+      }
+
+      Puppet::Node::Facts.indirection.save(facts, nil, options)
     end
   end
 
@@ -98,11 +104,12 @@ class Puppet::Resource::Catalog::Compiler < Puppet::Indirector::Code
   end
 
   # Turn our host name into a node object.
-  def find_node(name, environment)
+  def find_node(name, environment, transaction_uuid)
     Puppet::Util::Profiler.profile("Found node information") do
       node = nil
       begin
-        node = Puppet::Node.indirection.find(name, :environment => environment)
+        node = Puppet::Node.indirection.find(name, :environment => environment,
+                                             :transaction_uuid => transaction_uuid)
       rescue => detail
         message = "Failed when searching for node #{name}: #{detail}"
         Puppet.log_exception(detail, message)
@@ -137,7 +144,7 @@ class Puppet::Resource::Catalog::Compiler < Puppet::Indirector::Code
     # node's catalog with only one certificate and a modification to auth.conf
     # If no key is provided we can only compile the currently connected node.
     name = request.key || request.node
-    if node = find_node(name, request.environment)
+    if node = find_node(name, request.environment, request.options[:transaction_uuid])
       return node
     end
 

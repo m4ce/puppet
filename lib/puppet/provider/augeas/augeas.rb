@@ -385,7 +385,7 @@ Puppet::Type.type(:augeas).provide(:augeas) do
           save_result = @aug.save
           unless save_result
             print_put_errors
-            fail("Save failed with return code #{save_result}, see debug")
+            fail("Saving failed, see debug")
           end
 
           saved_files = @aug.match("/augeas/events/saved")
@@ -393,8 +393,8 @@ Puppet::Type.type(:augeas).provide(:augeas) do
             root = resource[:root].sub(/^\/$/, "")
             saved_files.map! {|key| @aug.get(key).sub(/^\/files/, root) }
             saved_files.uniq.each do |saved_file|
-              if Puppet[:show_diff]
-                notice "\n" + diff(saved_file, saved_file + ".augnew")
+              if Puppet[:show_diff] && @resource[:show_diff]
+                self.send(@resource[:loglevel], "\n" + diff(saved_file, saved_file + ".augnew"))
               end
               File.delete(saved_file + ".augnew")
             end
@@ -425,10 +425,10 @@ Puppet::Type.type(:augeas).provide(:augeas) do
     set_augeas_save_mode(SAVE_OVERWRITE) if versioncmp(get_augeas_version, "0.3.6") >= 0
     @aug.load
     do_execute_changes
-        unless @aug.save
-          print_put_errors
-          fail("Save failed with return code #{success}, see debug")
-        end
+    unless @aug.save
+      print_put_errors
+      fail("Save failed, see debug")
+    end
 
     :executed
   ensure

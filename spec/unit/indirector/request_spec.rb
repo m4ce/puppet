@@ -219,7 +219,7 @@ describe Puppet::Indirector::Request do
   end
 
   it "should set its environment to an environment instance when a string is specified as its environment" do
-    env = Puppet::Node::Environment.create(:foo, [], '')
+    env = Puppet::Node::Environment.create(:foo, [])
 
     Puppet.override(:environments => Puppet::Environments::Static.new(env)) do
       Puppet::Indirector::Request.new(:myind, :find, "my key", nil, :environment => "foo").environment.should == env
@@ -227,19 +227,17 @@ describe Puppet::Indirector::Request do
   end
 
   it "should use any passed in environment instances as its environment" do
-    env = Puppet::Node::Environment.create(:foo, [], '')
+    env = Puppet::Node::Environment.create(:foo, [])
 
     Puppet::Indirector::Request.new(:myind, :find, "my key", nil, :environment => env).environment.should equal(env)
   end
 
-  it "should use the configured environment when none is provided" do
-    configured = Puppet::Node::Environment.create(:foo, [], '')
+  it "should use the current environment when none is provided" do
+    configured = Puppet::Node::Environment.create(:foo, [])
 
     Puppet[:environment] = "foo"
 
-    Puppet.override(:environments => Puppet::Environments::Static.new(configured)) do
-      Puppet::Indirector::Request.new(:myind, :find, "my key", nil).environment.should == configured
-    end
+    expect(Puppet::Indirector::Request.new(:myind, :find, "my key", nil).environment).to eq(Puppet.lookup(:current_environment))
   end
 
   it "should support converting its options to a hash" do

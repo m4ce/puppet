@@ -24,6 +24,18 @@ describe Puppet::Type.type(:service).provider(:systemd) do
     end
   end
 
+  it "should be the default provider on rhel7" do
+    Facter.expects(:value).with(:osfamily).at_least_once.returns(:redhat)
+    Facter.expects(:value).with(:operatingsystemmajrelease).returns("7")
+    described_class.default?.should be_true
+  end
+
+  it "should not be the default provider on rhel6" do
+    Facter.expects(:value).with(:osfamily).at_least_once.returns(:redhat)
+    Facter.expects(:value).with(:operatingsystemmajrelease).returns("6")
+    described_class.default?.should_not be_true
+  end
+
   [:enabled?, :enable, :disable, :start, :stop, :status, :restart].each do |method|
     it "should have a #{method} method" do
       provider.should respond_to(method)
@@ -36,17 +48,13 @@ describe Puppet::Type.type(:service).provider(:systemd) do
     end
 
     it "should return only services" do
-      described_class.expects(:systemctl).with('list-units', '--type', 'service', '--full', '--all', '--no-pager').returns File.read(my_fixture('list_units_services'))
+      described_class.expects(:systemctl).with('list-unit-files', '--type', 'service', '--full', '--all', '--no-pager').returns File.read(my_fixture('list_unit_files_services'))
       described_class.instances.map(&:name).should =~ %w{
+        arp-ethers.service
         auditd.service
-        crond.service
-        dbus.service
-        display-manager.service
-        ebtables.service
-        fedora-readonly.service
-        initrd-switch-root.service
-        ip6tables.service
-        puppet.service
+        autovt@.service
+        avahi-daemon.service
+        blk-availability.service
       }
     end
   end

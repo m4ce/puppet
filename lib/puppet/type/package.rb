@@ -4,6 +4,7 @@
 # systems.
 
 require 'puppet/parameter/package_options'
+require 'puppet/parameter/boolean'
 
 module Puppet
   newtype(:package) do
@@ -54,7 +55,7 @@ module Puppet
       ensured for the given package. The meaning and format of these settings is
       provider-specific.",
       :methods => [:package_settings_insync?, :package_settings, :package_settings=]
-
+    feature :virtual_packages, "The provider accepts virtual package names for install and uninstall."
 
     ensurable do
       desc <<-EOT
@@ -239,30 +240,25 @@ module Puppet
     end
 
     newproperty(:package_settings, :required_features=>:package_settings) do
-      desc "Package settings. The definition of package settings is provider
-        specific. In general, these are certain properties which alter contents
-        of a package being installed. An example of package settings are the
-        FreeBSD ports options.
+      desc "Settings that can change the contents or configuration of a package.
 
-        The package_settings attribute is a property. This means that the options
-        can be enforced during package installation and verified/retrieved
-        for packages that are already installed.
+        The formatting and effects of package_settings are provider-specific; any
+        provider that implements them must explain how to use them in its
+        documentation. (Our general expectation is that if a package is
+        installed but its settings are out of sync, the provider should
+        re-install that package with the desired settings.)
 
-        For example, ports provider on FreeBSD implements the package settings
-        as port build options (the ones you normally set with make config).
-        There is a simple usage example for this particular provider:
+        An example of how package_settings could be used is FreeBSD's port build
+        options --- a future version of the provider could accept a hash of options,
+        and would reinstall the port if the installed version lacked the correct
+        settings.
 
             package { 'www/apache22':
               package_settings => { 'SUEXEC' => false }
             }
 
-        The above manifest ensures, that apache22 is compiled without SUEXEC
-        module.
-
-        Despite the package_settings are provider specific, the typical
-        behavior, when you change package's package_settings in your manifest,
-        is to reinstall package with new settings.
-        "
+        Again, check the documentation of your platform's package provider to see
+        the actual usage."
 
       validate do |value|
         if provider.respond_to?(:package_settings_validate)
@@ -424,6 +420,16 @@ module Puppet
         strings _must_ be double-escaped and backslashes in single-quoted
         strings _may_ be double-escaped.
       EOT
+    end
+
+    newparam(:allow_virtual, :boolean => true, :parent => Puppet::Parameter::Boolean, :required_features => :virtual_packages) do
+      desc 'Specifies if virtual package names are allowed for install and uninstall.'
+
+      # In a future release, this should be defaulted to true and the below deprecation warning removed
+      defaultto do
+        Puppet.deprecation_warning('The package type\'s allow_virtual parameter will be changing its default value from false to true in a future release. If you do not want to allow virtual packages, please explicitly set allow_virtual to false.') unless value
+        false
+      end
     end
 
     autorequire(:file) do

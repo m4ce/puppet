@@ -71,7 +71,7 @@ module Puppet
     end
   end
 
-  # configuration parameter access and stuff
+  # setting access and stuff
   def self.[]=(param,value)
     @@settings[param] = value
   end
@@ -107,7 +107,7 @@ module Puppet
     Puppet::Util::RunMode[@@settings.preferred_run_mode]
   end
 
-  # Load all of the configuration parameters.
+  # Load all of the settings.
   require 'puppet/defaults'
 
   def self.genmanifest
@@ -152,6 +152,7 @@ module Puppet
     Puppet.settings.initialize_app_defaults(Puppet::Settings.app_defaults_for_run_mode(run_mode))
     Puppet.push_context(Puppet.base_context(Puppet.settings), "Initial context after settings initialization")
     Puppet::Parser::Functions.reset
+    Puppet::Util::Log.level = Puppet[:log_level]
   end
   private_class_method :do_initialize_settings_for_run_mode
 
@@ -177,11 +178,23 @@ module Puppet
     environments = settings[:environmentpath]
     modulepath = Puppet::Node::Environment.split_path(settings[:basemodulepath])
 
-    loaders = Puppet::Environments::Directories.from_path(environments, modulepath)
-    loaders << Puppet::Environments::Legacy.new
+    if environments.empty?
+      loaders = [Puppet::Environments::Legacy.new]
+    else
+      loaders = Puppet::Environments::Directories.from_path(environments, modulepath)
+      # in case the configured environment (used for the default sometimes)
+      # doesn't exist
+      default_environment = Puppet[:environment].to_sym
+      if default_environment == :production
+        loaders << Puppet::Environments::StaticPrivate.new(
+          Puppet::Node::Environment.create(Puppet[:environment].to_sym,
+                                           [],
+                                           Puppet::Node::Environment::NO_MANIFEST))
+      end
+    end
 
     {
-      :environments => Puppet::Environments::Combined.new(*loaders)
+      :environments => Puppet::Environments::Cached.new(*loaders)
     }
   end
 
@@ -222,6 +235,16 @@ module Puppet
   # @api private
   def self.override(bindings, description = "", &block)
     @context.override(bindings, description, &block)
+  end
+
+  # @api private
+  def self.mark_context(name)
+    @context.mark(name)
+  end
+
+  # @api private
+  def self.rollback_context(name)
+    @context.rollback(name)
   end
 
   require 'puppet/node'

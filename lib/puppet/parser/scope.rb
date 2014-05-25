@@ -30,6 +30,9 @@ class Puppet::Parser::Scope
   attr_accessor :parent
   attr_reader :namespaces
 
+  # Hash of hashes of default values per type name
+  attr_reader :defaults
+
   # Add some alias methods that forward to the compiler, since we reference
   # them frequently enough to justify the extra method call.
   def_delegators :compiler, :catalog, :environment
@@ -239,6 +242,22 @@ class Puppet::Parser::Scope
     known_resource_types.find_definition(namespaces, name)
   end
 
+  def find_global_scope()
+    # walk upwards until first found node_scope or top_scope
+    if is_nodescope? || is_topscope?
+      self
+    else
+      next_scope = inherited_scope || enclosing_scope
+      if next_scope.nil?
+        # this happens when testing, and there is only a single test scope and no link to any
+        # other scopes
+        self
+      else
+        next_scope.find_global_scope()
+      end
+    end
+  end
+
   # This just delegates directly.
   def_delegator :compiler, :findresource
 
@@ -278,7 +297,7 @@ class Puppet::Parser::Scope
     # be used by top scopes and node scopes.
     @class_scopes = {}
 
-    @enable_trusted_data = Puppet[:trusted_node_data]
+    @enable_immutable_data = Puppet[:immutable_node_data]
   end
 
   # Store the fact that we've evaluated a class, and store a reference to
@@ -306,6 +325,17 @@ class Puppet::Parser::Scope
   # it collects all of the defaults, with defaults in closer scopes
   # overriding those in later scopes.
   def lookupdefaults(type)
+    if Puppet[:parser] == 'future'
+      lookupdefaults_4x(type)
+    else
+      lookupdefaults_3x(type)
+    end
+  end
+
+  # The implemetation for lookupdefaults for 3x where the order is:
+  # inherited, contained (recursive), self
+  #
+  def lookupdefaults_3x(type)
     values = {}
 
     # first collect the values from the parents
@@ -324,6 +354,35 @@ class Puppet::Parser::Scope
     end
 
     values
+  end
+
+  # The implementation for lookupdefaults for 4x where the order is:
+  # inherited-scope, closure-scope, self
+  #
+  def lookupdefaults_4x(type)
+    # This is an optimized version that avoids method calls and garbage creation
+    # Build array with scopes from most significant to least significant
+    influencing_scopes = [self]
+    is = inherited_scope
+    while is do
+      influencing_scopes << is
+      is = is.inherited_scope
+    end
+
+    es = enclosing_scope
+    while es do
+      influencing_scopes << es
+      es = es.enclosing_scope
+    end
+
+    # apply from least significant, to most significant
+    influencing_scopes.reverse.reduce({}) do | values, scope |
+      scope_defaults = scope.defaults
+      if scope_defaults.include?(type)
+        values.merge!(scope_defaults[type])
+      end
+      values
+    end
   end
 
   # Look up a defined type.
@@ -501,9 +560,46 @@ class Puppet::Parser::Scope
   # by default) including the values defined in parent. Local values
   # shadow parent values. Ephemeral scopes for match results ($0 - $n) are not included.
   #
+  # This is currently a wrapper for to_hash_legacy or to_hash_future.
+  #
+  # @see to_hash_future
+  #
+  # @see to_hash_legacy
   def to_hash(recursive = true)
+    @parser ||= Puppet[:parser]
+    if @parser == 'future'
+      to_hash_future(recursive)
+    else
+      to_hash_legacy(recursive)
+    end
+  end
+
+  # Fixed version of to_hash that implements scoping correctly (i.e., with
+  # dynamic scoping disabled #28200 / PUP-1220
+  #
+  # @see to_hash
+  def to_hash_future(recursive)
+    if recursive and has_enclosing_scope?
+      target = enclosing_scope.to_hash_future(recursive)
+      if !(inherited = inherited_scope).nil?
+        target.merge!(inherited.to_hash_future(recursive))
+      end
+    else
+      target = Hash.new
+    end
+
+    # add all local scopes
+    @ephemeral.last.add_entries_to(target)
+    target
+  end
+
+  # The old broken implementation of to_hash that retains the dynamic scoping
+  # semantics
+  #
+  # @see to_hash
+  def to_hash_legacy(recursive = true)
     if recursive and parent
-      target = parent.to_hash(recursive)
+      target = parent.to_hash_legacy(recursive)
     else
       target = Hash.new
     end
@@ -545,7 +641,7 @@ class Puppet::Parser::Scope
     }
   end
 
-  RESERVED_VARIABLE_NAMES = ['trusted'].freeze
+  RESERVED_VARIABLE_NAMES = ['trusted', 'facts'].freeze
 
   # Set a variable in the current scope.  This will override settings
   # in scopes above, but will not allow variables in the current scope
@@ -561,7 +657,7 @@ class Puppet::Parser::Scope
     end
 
     # Check for reserved variable names
-    if @enable_trusted_data && !options[:privileged] && RESERVED_VARIABLE_NAMES.include?(name)
+    if @enable_immutable_data && !options[:privileged] && RESERVED_VARIABLE_NAMES.include?(name)
       raise Puppet::ParseError, "Attempt to assign to a reserved variable name: '#{name}'"
     end
 
@@ -589,20 +685,28 @@ class Puppet::Parser::Scope
     setvar('trusted', deep_freeze(hash), :privileged => true)
   end
 
+  def set_facts(hash)
+    setvar('facts', deep_freeze(hash), :privileged => true)
+  end
+
   # Deeply freezes the given object. The object and its content must be of the types:
   # Array, Hash, Numeric, Boolean, Symbol, Regexp, NilClass, or String. All other types raises an Error.
   # (i.e. if they are assignable to Puppet::Pops::Types::Data type).
   #
   def deep_freeze(object)
     case object
+    when Array
+      object.each {|v| deep_freeze(v) }
+      object.freeze
     when Hash
       object.each {|k, v| deep_freeze(k); deep_freeze(v) }
-    when NilClass
+      object.freeze
+    when NilClass, Numeric, TrueClass, FalseClass
       # do nothing
     when String
       object.freeze
     else
-      raise Puppet::Error, "Unsupported data type: '#{object.class}"
+      raise Puppet::Error, "Unsupported data type: '#{object.class}'"
     end
     object
   end

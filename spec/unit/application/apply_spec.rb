@@ -74,7 +74,7 @@ describe Puppet::Application::Apply do
         @apply.options[:verbose].should == true
       end
       it "should set options[:show_diff] to true" do
-        Puppet[:show_diff] = false
+        Puppet.settings.override_default(:show_diff, false)
         @apply.setup_test
         Puppet[:show_diff].should == true
       end
@@ -180,7 +180,7 @@ describe Puppet::Application::Apply do
         @node = Puppet::Node.new(Puppet[:node_name_value])
         Puppet::Node.indirection.save(@node)
 
-        @catalog = Puppet::Resource::Catalog.new
+        @catalog = Puppet::Resource::Catalog.new("testing", Puppet.lookup(:environments).get(Puppet[:environment]))
         @catalog.stubs(:to_ral).returns(@catalog)
 
         Puppet::Resource::Catalog.indirection.stubs(:find).returns(@catalog)
@@ -197,6 +197,13 @@ describe Puppet::Application::Apply do
       after :each do
         Puppet::Node::Facts.indirection.reset_terminus_class
         Puppet::Node::Facts.indirection.cache_class = nil
+      end
+
+      around :each do |example|
+        Puppet.override(:current_environment =>
+                        Puppet::Node::Environment.create(:production, [])) do
+          example.run
+        end
       end
 
       it "should set the code to run from --code" do
@@ -390,22 +397,24 @@ describe Puppet::Application::Apply do
 
       it "should read the catalog in from disk if a file name is provided" do
         @apply.options[:catalog] = temporary_catalog
-        Puppet::Resource::Catalog.stubs(:convert_from).
-          with(:pson,'"something"').returns(Puppet::Resource::Catalog.new)
+        catalog = Puppet::Resource::Catalog.new("testing", Puppet::Node::Environment::NONE)
+        Puppet::Resource::Catalog.stubs(:convert_from).with(:pson,'"something"').returns(catalog)
         @apply.apply
       end
 
       it "should read the catalog in from stdin if '-' is provided" do
         @apply.options[:catalog] = "-"
         $stdin.expects(:read).returns '"something"'
-        Puppet::Resource::Catalog.stubs(:convert_from).with(:pson,'"something"').returns Puppet::Resource::Catalog.new
+        catalog = Puppet::Resource::Catalog.new("testing", Puppet::Node::Environment::NONE)
+        Puppet::Resource::Catalog.stubs(:convert_from).with(:pson,'"something"').returns(catalog)
         @apply.apply
       end
 
       it "should deserialize the catalog from the default format" do
         @apply.options[:catalog] = temporary_catalog
         Puppet::Resource::Catalog.stubs(:default_format).returns :rot13_piglatin
-        Puppet::Resource::Catalog.stubs(:convert_from).with(:rot13_piglatin,'"something"').returns Puppet::Resource::Catalog.new
+        catalog = Puppet::Resource::Catalog.new("testing", Puppet::Node::Environment::NONE)
+        Puppet::Resource::Catalog.stubs(:convert_from).with(:rot13_piglatin,'"something"').returns(catalog)
         @apply.apply
       end
 
@@ -417,13 +426,14 @@ describe Puppet::Application::Apply do
       it "should convert plain data structures into a catalog if deserialization does not do so" do
         @apply.options[:catalog] = temporary_catalog
         Puppet::Resource::Catalog.stubs(:convert_from).with(:pson,'"something"').returns({:foo => "bar"})
-        Puppet::Resource::Catalog.expects(:pson_create).with({:foo => "bar"}).returns(Puppet::Resource::Catalog.new)
+        catalog = Puppet::Resource::Catalog.new("testing", Puppet::Node::Environment::NONE)
+        Puppet::Resource::Catalog.expects(:pson_create).with({:foo => "bar"}).returns(catalog)
         @apply.apply
       end
 
       it "should convert the catalog to a RAL catalog and use a Configurer instance to apply it" do
         @apply.options[:catalog] = temporary_catalog
-        catalog = Puppet::Resource::Catalog.new
+        catalog = Puppet::Resource::Catalog.new("testing", Puppet::Node::Environment::NONE)
         Puppet::Resource::Catalog.stubs(:convert_from).with(:pson,'"something"').returns catalog
         catalog.expects(:to_ral).returns "mycatalog"
 

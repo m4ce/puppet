@@ -5,6 +5,7 @@
 class Puppet::Pops::Parser::Parser
 
 token STRING DQPRE DQMID DQPOST
+token WORD
 token LBRACK  RBRACK LBRACE RBRACE SYMBOL FARROW COMMA TRUE
 token FALSE EQUALS APPENDS DELETES LESSEQUAL NOTEQUAL DOT COLON LLCOLLECT RRCOLLECT
 token QMARK LPAREN RPAREN ISEQUAL GREATEREQUAL GREATERTHAN LESSTHAN
@@ -16,6 +17,10 @@ token MATCH NOMATCH REGEX IN_EDGE OUT_EDGE IN_EDGE_SUB OUT_EDGE_SUB
 token IN UNLESS PIPE
 token LAMBDA SELBRACE
 token NUMBER
+token HEREDOC SUBLOCATE
+token RENDER_STRING RENDER_EXPR EPP_START EPP_END EPP_END_TRIM
+token FUNCTION
+token PRIVATE ATTR TYPE
 token LOW
 
 prechigh
@@ -27,11 +32,13 @@ prechigh
   left  AT ATAT
   left  DOT
   left  CALL
+  nonassoc EPP_START
   left  LBRACK LISTSTART
   left  RBRACK
   left  QMARK
   left  LCOLLECT LLCOLLECT
   right NOT
+  nonassoc SPLAT
   nonassoc UMINUS
   left  IN
   left  MATCH NOMATCH
@@ -51,6 +58,8 @@ prechigh
   left  CASE_COLON
   left  FARROW
   left  COMMA
+  nonassoc RENDER_EXPR
+  nonassoc RENDER_STRING
   left  LOW
 preclow
 
@@ -58,6 +67,7 @@ rule
 # Produces [Model::BlockExpression, Model::Expression, nil] depending on multiple statements, single statement or empty
 program
   : statements { result = create_program(Factory.block_or_expression(*val[0])) }
+  | epp_expression { result = create_program(Factory.block_or_expression(*val[0])) }
   | nil
 
 # Produces a semantic model (non validated, but semantically adjusted).
@@ -104,6 +114,7 @@ expression
   | expression LSHIFT       expression                 { result = val[0] <<  val[2]       ; loc result, val[1] }
   | expression RSHIFT       expression                 { result = val[0] >>  val[2]       ; loc result, val[1] }
   |            MINUS        expression         =UMINUS { result = val[1].minus()          ; loc result, val[0] }
+  |            TIMES        expression         =SPLAT  { result = val[1].unfold()         ; loc result, val[0] }
   | expression NOTEQUAL     expression                 { result = val[0].ne  val[2]       ; loc result, val[1] }
   | expression ISEQUAL      expression                 { result = val[0] ==  val[2]       ; loc result, val[1] }
   | expression GREATERTHAN  expression                 { result = val[0] >   val[2]       ; loc result, val[1] }
@@ -143,8 +154,10 @@ primary_expression
   | definition_expression
   | hostclass_expression
   | node_definition_expression
+  | epp_render_expression
+  | reserved_word
 
-# Aleways have the same value
+# Allways have the same value
 literal_expression
   : array
   | boolean
@@ -221,8 +234,8 @@ lambda_rest
 
 # Produces Array<Model::Parameter>
 lambda_parameter_list
-: PIPE PIPE                     { result = [] }
-| PIPE parameters endcomma PIPE { result = val[1] }
+  : PIPE PIPE                     { result = [] }
+  | PIPE parameters endcomma PIPE { result = val[1] }
 
 #---CONDITIONALS
 #
@@ -390,7 +403,13 @@ resource_expression
       result = case Factory.resource_shape(val[0])
       when :resource, :class
         # This catches deprecated syntax.
-        error val[1], "All resource specifications require names"
+        # If the attribute operations does not include +>, then the found expression
+        # is actually a LEFT followed by LITERAL_HASH
+        #
+        unless tmp = transform_resource_wo_title(val[0], val[2])
+          error val[1], "Syntax error resource body without title or hash with +>"
+        end
+        tmp
       when :defaults
         Factory.RESOURCE_DEFAULTS(val[0], val[2])
       when :override
@@ -568,17 +587,31 @@ node_definition_expression
     | regex
 
   dotted_name
-    : NAME        { result = Factory.literal(val[0][:value]); loc result, val[0] }
-    | dotted_name DOT NAME { result = Factory.concat(val[0], '.', val[2][:value]); loc result, val[0], val[2] }
+    : name_or_number   { result = Factory.literal(val[0][:value]); loc result, val[0] }
+    | dotted_name DOT name_or_number { result = Factory.concat(val[0], '.', val[2][:value]); loc result, val[0], val[2] }
+
+  name_or_number
+    : NAME
+    | NUMBER
 
   # Produces Expression, since hostname is an Expression
   nodeparent
     : nil
     | INHERITS hostname { result = val[1] }
 
+#---FUNCTION DEFINITION
+#
+#function_definition
+  # For now the function word will just be reserved, in the future it will
+  # produce a function definition
+  # FUNCTION classname parameter_list LBRACE opt_statements RBRACE {
+  #   result = add_definition(Factory.FUNCTION(val[1][:value], val[2], val[4]))
+  #   loc result, val[0], val[5]
+  # }
+
 #---NAMES AND PARAMETERS COMMON TO SEVERAL RULES
 #   Produces String
-#
+#   TODO: The error that "class" is not a valid classname is bad - classname rule is also used for other things
 classname
   : NAME  { result = val[0] }
   | CLASS { error val[0], "'class' is not a valid classname" }
@@ -612,6 +645,14 @@ parameter
 variable
   : VARIABLE { result = Factory.fqn(val[0][:value]).var ; loc result, val[0] }
 
+#---RESERVED WORDS
+#
+reserved_word
+  : FUNCTION  { result = Factory.RESERVED(val[0][:value]) ; loc result, val[0] }
+  | PRIVATE   { result = Factory.RESERVED(val[0][:value]) ; loc result, val[0] }
+  | TYPE      { result = Factory.RESERVED(val[0][:value]) ; loc result, val[0] }
+  | ATTR      { result = Factory.RESERVED(val[0][:value]) ; loc result, val[0] }
+
 #---LITERALS (dynamic and static)
 #
 
@@ -638,8 +679,12 @@ hash
 quotedtext
   : string
   | dq_string
+  | heredoc
 
-string          : STRING                 { result = Factory.literal(val[0][:value]) ; loc result, val[0] }
+string
+  : STRING  { result = Factory.literal(val[0][:value]) ; loc result, val[0] }
+  | WORD    { result = Factory.literal(val[0][:value]) ; loc result, val[0] }
+
 dq_string       : dqpre dqrval           { result = Factory.string(val[0], *val[1]) ; loc result, val[0], val[1][-1] }
 dqpre           : DQPRE                  { result = Factory.literal(val[0][:value]); loc result, val[0] }
 dqpost          : DQPOST                 { result = Factory.literal(val[0][:value]); loc result, val[0] }
@@ -650,6 +695,30 @@ text_expression : expression             { result = Factory.TEXT(val[0]) }
 dqtail
   : dqpost        { result = [val[0]] }
   | dqmid dqrval  { result = [val[0]] + val[1] }
+
+heredoc
+  : HEREDOC sublocated_text  { result = Factory.HEREDOC(val[0][:value], val[1]); loc result, val[0] }
+
+sublocated_text
+  : SUBLOCATE string    { result = Factory.SUBLOCATE(val[0], val[1]); loc result, val[0] }
+  | SUBLOCATE dq_string { result = Factory.SUBLOCATE(val[0], val[1]); loc result, val[0] }
+
+epp_expression
+  : EPP_START epp_parameters_list statements { result = Factory.EPP(val[1], val[2]); loc result, val[0] }
+
+epp_parameters_list
+  :                                  =LOW{ result = nil }
+  | PIPE PIPE                        { result = [] }
+  | PIPE parameters endcomma PIPE    { result = val[1] }
+
+epp_render_expression
+  : RENDER_STRING                  { result = Factory.RENDER_STRING(val[0][:value]); loc result, val[0] }
+  | RENDER_EXPR expression epp_end { result = Factory.RENDER_EXPR(val[1]); loc result, val[0], val[2] }
+  | RENDER_EXPR LBRACE statements RBRACE epp_end { result = Factory.RENDER_EXPR(Factory.block_or_expression(*val[2])); loc result, val[0], val[4] }
+
+epp_end
+  : EPP_END
+  | EPP_END_TRIM
 
 number   : NUMBER   { result = Factory.NUMBER(val[0][:value]) ; loc result, val[0] }
 name     : NAME     { result = Factory.QNAME_OR_NUMBER(val[0][:value]) ; loc result, val[0] }
@@ -676,20 +745,20 @@ endsemi
   | SEMIC
 
 keyword
- : AND
- | CASE
- | CLASS
- | DEFAULT
- | DEFINE
- | ELSE
- | ELSIF
- | IF
- | IN
- | INHERITS
- | NODE
- | OR
- | UNDEF
- | UNLESS
+  : AND
+  | CASE
+  | CLASS
+  | DEFAULT
+  | DEFINE
+  | ELSE
+  | ELSIF
+  | IF
+  | IN
+  | INHERITS
+  | NODE
+  | OR
+  | UNDEF
+  | UNLESS
 
 nil
   : { result = nil}

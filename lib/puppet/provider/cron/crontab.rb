@@ -89,6 +89,14 @@ Puppet::Type.type(:cron).provide(:crontab, :parent => Puppet::Provider::ParsedFi
     end
   end
 
+  def create
+    if resource.should(:command) then
+      super
+    else
+      resource.err "no command specified, cannot create"
+    end
+  end
+
   # Look up a resource with a given name whose user matches a record target
   #
   # @api private
@@ -105,8 +113,11 @@ Puppet::Type.type(:cron).provide(:crontab, :parent => Puppet::Provider::ParsedFi
   def self.resource_for_record(record, resources)
     resource = super
 
-    if resource and record[:target] == resource[:user]
-      resource
+    if resource
+      target = resource[:target] || resource[:user]
+      if record[:target] == target
+        resource
+      end
     end
   end
 

@@ -3,6 +3,7 @@ require 'puppet/pops/evaluator/compare_operator'
 require 'puppet/pops/evaluator/relationship_operator'
 require 'puppet/pops/evaluator/access_operator'
 require 'puppet/pops/evaluator/closure'
+require 'puppet/pops/evaluator/external_syntax_support'
 
 # This implementation of {Puppet::Pops::Evaluator} performs evaluation using the puppet 3.x runtime system
 # in a manner largely compatible with Puppet 3.x, but adds new features and introduces constraints.
@@ -27,6 +28,7 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
   # This separation has been made to make it easier to later migrate the evaluator to an improved runtime.
   #
   include Puppet::Pops::Evaluator::Runtime3Support
+  include Puppet::Pops::Evaluator::ExternalSyntaxSupport
 
   # This constant is not defined as Float::INFINITY in Ruby 1.8.7 (but is available in later version
   # Refactor when support is dropped for Ruby 1.8.7.
@@ -80,8 +82,14 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
   def evaluate(target, scope)
     begin
       @@eval_visitor.visit_this_1(self, target, scope)
+
+    rescue Puppet::Pops::SemanticError => e
+      # a raised issue may not know the semantic target
+      fail(e.issue, e.semantic || target, e.options, e)
+
     rescue StandardError => e
       if e.is_a? Puppet::ParseError
+        # ParseError's are supposed to be fully configured with location information
         raise e
       end
       fail(Issues::RUNTIME_ERROR, target, {:detail => e.message}, e)
@@ -117,6 +125,61 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
     @@string_visitor.visit_this_1(self, o, scope)
   end
 
+  # Call a closure matching arguments by name - Can only be called with a Closure (for now), may be refactored later
+  # to also handle other types of calls (function calls are also handled by CallNamedFunction and CallMethod, they
+  # could create similar objects to Closure, wait until other types of defines are instantiated - they may behave
+  # as special cases of calls - i.e. 'new').
+  #
+  # Call by name supports a "spill_over" mode where extra arguments in the given args_hash are introduced
+  # as variables in the resulting scope.
+  #
+  # @raise ArgumentError, if there are to many or too few arguments
+  # @raise ArgumentError, if given closure is not a Puppet::Pops::Evaluator::Closure
+  #
+  def call_by_name(closure, args_hash, scope, spill_over = false)
+    raise ArgumentError, "Can only call a Lambda" unless closure.is_a?(Puppet::Pops::Evaluator::Closure)
+    pblock = closure.model
+    parameters = pblock.parameters || []
+
+    if !spill_over && args_hash.size > parameters.size
+      raise ArgumentError, "Too many arguments: #{args_hash.size} for #{parameters.size}" 
+    end
+
+    # associate values with parameters
+    scope_hash = {}
+    parameters.each do |p|
+      scope_hash[p.name] = args_hash[p.name] || evaluate(p.value, scope)
+    end
+    missing = scope_hash.reduce([]) {|memo, entry| memo << entry[0] if entry[1].nil?; memo }
+    unless missing.empty?
+      optional = parameters.count { |p| !p.value.nil? }
+      raise ArgumentError, "Too few arguments; no value given for required parameters #{missing.join(" ,")}"
+    end
+    if spill_over
+      # all args from given hash should be used, nil entries replaced by default values should win
+      scope_hash = args_hash.merge(scope_hash)
+    end
+
+    # Store the evaluated name => value associations in a new inner/local/ephemeral scope
+    # (This is made complicated due to the fact that the implementation of scope is overloaded with
+    # functionality and an inner ephemeral scope must be used (as opposed to just pushing a local scope
+    # on a scope "stack").
+
+    # Ensure variable exists with nil value if error occurs.
+    # Some ruby implementations does not like creating variable on return
+    result = nil
+    begin
+      scope_memo = get_scope_nesting_level(scope)
+      # change to create local scope_from - cannot give it file and line - that is the place of the call, not
+      # "here"
+      create_local_scope_from(scope_hash, scope)
+      result = evaluate(pblock.body, scope)
+    ensure
+      set_scope_nesting_level(scope, scope_memo)
+    end
+    result
+  end
+
   # Call a closure - Can only be called with a Closure (for now), may be refactored later
   # to also handle other types of calls (function calls are also handled by CallNamedFunction and CallMethod, they
   # could create similar objects to Closure, wait until other types of defines are instantiated - they may behave
@@ -132,30 +195,36 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
 
     raise ArgumentError, "Too many arguments: #{args.size} for #{parameters.size}" unless args.size <= parameters.size
 
-    # associate values with parameters
-    merged = parameters.zip(args)
     # calculate missing arguments
-    missing = parameters.slice(args.size, parameters.size - args.size).select {|p| p.value.nil? }
+    args_diff = parameters.size - args.size
+    missing = parameters.slice(args.size, args_diff).select {|p| p.value.nil? }
     unless missing.empty?
       optional = parameters.count { |p| !p.value.nil? }
       raise ArgumentError, "Too few arguments; #{args.size} for #{optional > 0 ? ' min ' : ''}#{parameters.size - optional}"
     end
+    # associate values with parameters (pad missing with :missing)
+    merged = parameters.zip(args.fill(:missing, args.size, args_diff))
 
     evaluated = merged.collect do |m|
       # m can be one of
       # m = [Parameter{name => "name", value => nil], "given"]
       #   | [Parameter{name => "name", value => Expression}, "given"]
+      #   | [Parameter{name => "name", value => Expression}, :missing]
       #
-      # "given" is always an optional entry. If a parameter was provided then
-      # the entry will be in the array, otherwise the m array will be a
-      # single element.a = []
+      # "given" may be nil or :undef which means that this is the value to use,
+      # not a default expression.
+      #
       given_argument = m[1]
       argument_name = m[0].name
       default_expression = m[0].value
 
-      value = if default_expression
+      # Use default value if a value was not given (NOTE: An :undef overrides - just a nil overrides default in ruby).
+      value =
+      if given_argument == :missing
+        # nothing was given, use default (it is guaranteed to exist)
         evaluate(default_expression, scope)
       else
+        # use the given value
         given_argument
       end
       [argument_name, value]
@@ -252,6 +321,12 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
     o.value
   end
 
+  # Reserved Words fail to evaluate
+  #
+  def eval_ReservedWord(o, scope)
+    fail(Puppet::Pops::Issues::RESERVED_WORD, o, {:word => o.word})
+  end
+
   def eval_LiteralDefault(o, scope)
     :default
   end
@@ -272,6 +347,19 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
 
   def eval_UnaryMinusExpression(o, scope)
     - coerce_numeric(evaluate(o.expr, scope), o, scope)
+  end
+
+  def eval_UnfoldExpression(o, scope)
+    candidate = evaluate(o.expr, scope)
+    case candidate
+    when Array
+      candidate
+    when Hash
+      candidate.to_a
+    else
+      # turns anything else into an array (so result can be unfolded)
+      [candidate]
+    end
   end
 
   # Abstract evaluation, returns array [left, right] with the evaluated result of left_expr and
@@ -392,6 +480,23 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
     end
   end
 
+  def eval_EppExpression(o, scope)
+    scope["@epp"] = []
+    evaluate(o.body, scope)
+    result = scope["@epp"].join('')
+    result
+  end
+
+  def eval_RenderStringExpression(o, scope)
+    scope["@epp"] << o.value.dup
+    nil
+  end
+
+  def eval_RenderExpression(o, scope)
+    scope["@epp"] << string(evaluate(o.expr, scope), scope)
+    nil
+  end
+
   # Evaluates Puppet DSL ->, ~>, <-, and <~
   def eval_RelationshipExpression(o, scope)
     # First level evaluation, reduction to basic data types or puppet types, the relationship operator then translates this
@@ -468,7 +573,7 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
   end
 
   # Evaluates matching expressions with type, string or regexp rhs expression.
-  # If RHS is a type, the =~ matches compatible (assignable?) type.
+  # If RHS is a type, the =~ matches compatible (instance? of) type.
   #
   # @example
   #   x =~ /abc.*/
@@ -479,21 +584,20 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
   #   x =~ "${y}.*"
   # @example
   #   [1,2,3] =~ Array[Integer[1,10]]
+  #
+  # Note that a string is not instance? of Regexp, only Regular expressions are.
+  # The Pattern type should instead be used as it is specified as subtype of String.
+  #
   # @return [Boolean] if a match was made or not. Also sets $0..$n to matchdata in current scope.
   #
   def eval_MatchExpression o, scope
     left, pattern = eval_BinaryExpression o, scope
     # matches RHS types as instance of for all types except a parameterized Regexp[R]
     if pattern.is_a?(Puppet::Pops::Types::PAbstractType)
-      if pattern.is_a?(Puppet::Pops::Types::PRegexpType) && pattern.pattern
-        # A qualified PRegexpType, get its ruby regexp
-        pattern = pattern.regexp
-      else
-        # evaluate as instance?
-        matched = @@type_calculator.instance?(pattern, left)
-        # convert match result to Boolean true, or false
-        return o.operator == :'=~' ? !!matched : !matched
-      end
+      # evaluate as instance? of type check
+      matched = @@type_calculator.instance?(pattern, left)
+      # convert match result to Boolean true, or false
+      return o.operator == :'=~' ? !!matched : !matched
     end
 
     begin
@@ -536,10 +640,11 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
   end
 
   # Evaluates each entry of the literal list and creates a new Array
+  # Supports unfolding of entries
   # @return [Array] with the evaluated content
   #
   def eval_LiteralList o, scope
-    o.values.collect {|expr| evaluate(expr, scope)}
+    unfold([], o.values, scope)
   end
 
   # Evaluates each entry of the literal hash and creates a new Hash.
@@ -576,8 +681,17 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
       if o.options.find do |co|
         # the first case option that matches
         if co.values.find do |c|
-          the_default = co.then_expr if c.is_a? Puppet::Pops::Model::LiteralDefault
-          is_match?(test, evaluate(c, scope), c, scope)
+          case c
+          when Puppet::Pops::Model::LiteralDefault
+            the_default = co.then_expr
+            is_match?(test, evaluate(c, scope), c, scope)
+          when Puppet::Pops::Model::UnfoldExpression
+            # not ideal for error reporting, since it is not known which unfolded result
+            # that caused an error - the entire unfold expression is blamed (i.e. the var c, passed to is_match?)
+            evaluate(c, scope).any? {|v| is_match?(test, v, c, scope) }
+          else
+            is_match?(test, evaluate(c, scope), c, scope)
+          end
         end
         result = evaluate(co.then_expr, scope)
         true # the option was picked
@@ -672,18 +786,22 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
   def eval_CallNamedFunctionExpression(o, scope)
     # The functor expression is not evaluated, it is not possible to select the function to call
     # via an expression like $a()
-    unless o.functor_expr.is_a? Puppet::Pops::Model::QualifiedName
+    case o.functor_expr
+    when Puppet::Pops::Model::QualifiedName
+      # ok
+    when Puppet::Pops::Model::RenderStringExpression
+      # helpful to point out this easy to make Epp error
+      fail(Issues::ILLEGAL_EPP_PARAMETERS, o)
+    else
       fail(Issues::ILLEGAL_EXPRESSION, o.functor_expr, {:feature=>'function name', :container => o})
     end
     name = o.functor_expr.value
-    assert_function_available(name, o, scope)
-    evaluated_arguments = o.arguments.collect {|arg| evaluate(arg, scope) }
+
+    evaluated_arguments = unfold([], o.arguments, scope)
+
     # wrap lambda in a callable block if it is present
     evaluated_arguments << Puppet::Pops::Evaluator::Closure.new(self, o.lambda, scope) if o.lambda
-    call_function(name, evaluated_arguments, o, scope) do |result|
-      # prevent functions that are not r-value from leaking its return value
-      rvalue_function?(name, o, scope) ? result : nil
-    end
+    call_function(name, evaluated_arguments, o, scope)
   end
 
   # Evaluation of CallMethodExpression handles a NamedAccessExpression functor (receiver.function_name)
@@ -698,13 +816,12 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
       fail(Issues::ILLEGAL_EXPRESSION, o.functor_expr, {:feature=>'function name', :container => o})
     end 
     name = name.value # the string function name
-    assert_function_available(name, o, scope)
-    evaluated_arguments = [receiver] + (o.arguments || []).collect {|arg| evaluate(arg, scope) }
+
+    evaluated_arguments = unfold([receiver], o.arguments || [], scope)
+
+    # wrap lambda in a callable block if it is present
     evaluated_arguments << Puppet::Pops::Evaluator::Closure.new(self, o.lambda, scope) if o.lambda
-    call_function(name, evaluated_arguments, o, scope) do |result|
-      # prevent functions that are not r-value from leaking its return value
-      rvalue_function?(name, o, scope) ? result : nil
-    end
+    call_function(name, evaluated_arguments, o, scope)
   end
 
   # @example
@@ -716,16 +833,41 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
     #
     with_guarded_scope(scope) do
       test = evaluate(o.left_expr, scope)
+      the_default = nil
       selected = o.selectors.find do |s|
-        candidate = evaluate(s.matching_expr, scope)
-        candidate == :default || is_match?(test, candidate, s.matching_expr, scope)
+        me = s.matching_expr
+        case me
+        when Puppet::Pops::Model::LiteralDefault
+          the_default = s.value_expr
+          false
+        when Puppet::Pops::Model::UnfoldExpression
+          # not ideal for error reporting, since it is not known which unfolded result
+          # that caused an error - the entire unfold expression is blamed (i.e. the var c, passed to is_match?)
+          evaluate(me, scope).any? {|v| is_match?(test, v, me, scope) }
+        else
+          is_match?(test, evaluate(me, scope), me, scope)
+        end
       end
       if selected
         evaluate(selected.value_expr, scope)
+      elsif the_default
+        evaluate(the_default, scope)
       else
-        nil
+        fail(Issues::UNMATCHED_SELECTOR, o.left_expr, :param_value => test)
       end
     end
+  end
+
+  # SubLocatable is simply an expression that holds location information
+  def eval_SubLocatedExpression o, scope
+    evaluate(o.expr, scope)
+  end
+
+  # Evaluates Puppet DSL Heredoc
+  def eval_HeredocExpression o, scope
+    result = evaluate(o.text_expr, scope)
+    assert_external_syntax(scope, result, o.syntax, o.text_expr)
+    result
   end
 
   # Evaluates Puppet DSL `if`
@@ -973,5 +1115,24 @@ class Puppet::Pops::Evaluator::EvaluatorImpl
       set_scope_nesting_level(scope, scope_memo)
     end
   end
+
+  # Maps the expression in the given array to their product except for UnfoldExpressions which are first unfolded.
+  # The result is added to the given result Array.
+  # @param result [Array] Where to add the result (may contain information to add to)
+  # @param array [Array[Puppet::Pops::Model::Expression] the expressions to map
+  # @param scope [Puppet::Parser::Scope] the scope to evaluate in
+  # @return [Array] the given result array with content added from the operation
+  #
+  def unfold(result, array, scope)
+    array.each do |x|
+      if x.is_a?(Puppet::Pops::Model::UnfoldExpression)
+        result.concat(evaluate(x, scope))
+      else
+        result << evaluate(x, scope)
+      end
+    end
+    result
+  end
+  private :unfold
 
 end

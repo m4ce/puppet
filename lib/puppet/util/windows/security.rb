@@ -87,6 +87,7 @@ module Puppet::Util::Windows::Security
   include Puppet::Util::Windows::SID
 
   extend Puppet::Util::Windows::Security
+  extend FFI::Library
 
   # file modes
   S_IRUSR = 0000400
@@ -398,11 +399,13 @@ module Puppet::Util::Windows::Security
     end
   end
 
-  def add_access_denied_ace(acl, mask, sid)
+  def add_access_denied_ace(acl, mask, sid, inherit = nil)
+    inherit ||= NO_INHERITANCE
+
     string_to_sid_ptr(sid) do |sid_ptr|
       raise Puppet::Util::Windows::Error.new("Invalid SID") unless IsValidSid(sid_ptr)
 
-      unless AddAccessDeniedAce(acl, ACL_REVISION, mask, sid_ptr)
+      unless AddAccessDeniedAceEx(acl, ACL_REVISION, inherit, mask, sid_ptr)
         raise Puppet::Util::Windows::Error.new("Failed to add access control entry")
       end
     end
@@ -562,11 +565,11 @@ module Puppet::Util::Windows::Security
           owner = sid_ptr_to_string(owner_sid.unpack('L')[0])
           group = sid_ptr_to_string(group_sid.unpack('L')[0])
 
-          control = FFI::MemoryPointer.new(:uint16, 1)
-          revision = FFI::MemoryPointer.new(:uint32, 1)
+          control = FFI::MemoryPointer.new(:word, 1)
+          revision = FFI::MemoryPointer.new(:dword, 1)
           ffsd = FFI::Pointer.new(ppsd.unpack('L')[0])
 
-          if ! API.get_security_descriptor_control(ffsd, control, revision)
+          if GetSecurityDescriptorControl(ffsd, control, revision) == FFI::WIN32_FALSE
             raise Puppet::Util::Windows::Error.new("Failed to get security descriptor control")
           end
 
@@ -606,7 +609,7 @@ module Puppet::Util::Windows::Security
                   add_access_allowed_ace(acl, ace.mask, ace.sid, ace.flags)
                 when ACCESS_DENIED_ACE_TYPE
                   #puts "ace: deny, sid #{sid_to_name(ace.sid)}, mask 0x#{ace.mask.to_s(16)}"
-                  add_access_denied_ace(acl, ace.mask, ace.sid)
+                  add_access_denied_ace(acl, ace.mask, ace.sid, ace.flags)
                 else
                   raise "We should never get here"
                   # TODO: this should have been a warning in an earlier commit
@@ -632,18 +635,18 @@ module Puppet::Util::Windows::Security
     end
   end
 
-  module API
-    extend FFI::Library
-    ffi_lib 'kernel32'
-    ffi_convention :stdcall
+  ffi_convention :stdcall
 
-    # typedef WORD SECURITY_DESCRIPTOR_CONTROL, *PSECURITY_DESCRIPTOR_CONTROL;
-    # BOOL WINAPI GetSecurityDescriptorControl(
-    #   _In_   PSECURITY_DESCRIPTOR pSecurityDescriptor,
-    #   _Out_  PSECURITY_DESCRIPTOR_CONTROL pControl,
-    #   _Out_  LPDWORD lpdwRevision
-    # );
-    ffi_lib :advapi32
-    attach_function :get_security_descriptor_control, :GetSecurityDescriptorControl, [:pointer, :pointer, :pointer], :bool
-  end
+  # http://msdn.microsoft.com/en-us/library/windows/hardware/ff556610(v=vs.85).aspx
+  # http://msdn.microsoft.com/en-us/library/windows/desktop/aa379561(v=vs.85).aspx
+  # http://msdn.microsoft.com/en-us/library/windows/desktop/aa446647(v=vs.85).aspx
+  # typedef WORD SECURITY_DESCRIPTOR_CONTROL, *PSECURITY_DESCRIPTOR_CONTROL;
+  # BOOL WINAPI GetSecurityDescriptorControl(
+  #   _In_   PSECURITY_DESCRIPTOR pSecurityDescriptor,
+  #   _Out_  PSECURITY_DESCRIPTOR_CONTROL pControl,
+  #   _Out_  LPDWORD lpdwRevision
+  # );
+  ffi_lib :advapi32
+  attach_function_private :GetSecurityDescriptorControl,
+    [:pointer, :lpword, :lpdword], :win32_bool
 end

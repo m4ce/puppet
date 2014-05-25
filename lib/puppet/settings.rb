@@ -13,14 +13,17 @@ class Puppet::Settings
   require 'puppet/settings/enum_setting'
   require 'puppet/settings/file_setting'
   require 'puppet/settings/directory_setting'
+  require 'puppet/settings/file_or_directory_setting'
   require 'puppet/settings/path_setting'
   require 'puppet/settings/boolean_setting'
   require 'puppet/settings/terminus_setting'
   require 'puppet/settings/duration_setting'
+  require 'puppet/settings/ttl_setting'
   require 'puppet/settings/priority_setting'
   require 'puppet/settings/autosign_setting'
   require 'puppet/settings/config_file'
   require 'puppet/settings/value_translator'
+  require 'puppet/settings/environment_conf'
 
   # local reference for convenience
   PuppetOptionParser = Puppet::Util::CommandLine::PuppetOptionParser
@@ -79,6 +82,7 @@ class Puppet::Settings
       :cli => Values.new(:cli, @config),
       :memory => Values.new(:memory, @config),
       :application_defaults => Values.new(:application_defaults, @config),
+      :overridden_defaults => Values.new(:overridden_defaults, @config),
     }
     @configuration_file = nil
 
@@ -101,20 +105,42 @@ class Puppet::Settings
   end
 
   # Retrieve a config value
+  # @param param [Symbol] the name of the setting
+  # @return [Object] the value of the setting
+  # @api private
   def [](param)
+    Puppet.deprecation_warning("Accessing '#{param}' as a setting is deprecated. See http://links.puppetlabs.com/env-settings-deprecations") if DEPRECATED_SETTINGS.include?(param)
     value(param)
   end
 
   # Set a config value.  This doesn't set the defaults, it sets the value itself.
+  # @param param [Symbol] the name of the setting
+  # @param value [Object] the new value of the setting
+  # @api private
   def []=(param, value)
+    Puppet.deprecation_warning("Modifying '#{param}' as a setting is deprecated. See http://links.puppetlabs.com/env-settings-deprecations") if DEPRECATED_SETTINGS.include?(param)
     @value_sets[:memory].set(param, value)
+    unsafe_flush_cache
+  end
+
+  # Create a new default value for the given setting. The default overrides are
+  # higher precedence than the defaults given in defaults.rb, but lower
+  # precedence than any other values for the setting. This allows one setting
+  # `a` to change the default of setting `b`, but still allow a user to provide
+  # a value for setting `b`.
+  #
+  # @param param [Symbol] the name of the setting
+  # @param value [Object] the new default value for the setting
+  # @api private
+  def override_default(param, value)
+    @value_sets[:overridden_defaults].set(param, value)
     unsafe_flush_cache
   end
 
   # Generate the list of valid arguments, in a format that GetoptLong can
   # understand, and add them to the passed option list.
   def addargs(options)
-    # Add all of the config parameters as valid options.
+    # Add all of the settings as valid options.
     self.each { |name, setting|
       setting.getopt_args.each { |args| options << args }
     }
@@ -125,7 +151,7 @@ class Puppet::Settings
   # Generate the list of valid arguments, in a format that OptionParser can
   # understand, and add them to the passed option list.
   def optparse_addargs(options)
-    # Add all of the config parameters as valid options.
+    # Add all of the settings as valid options.
     self.each { |name, setting|
       options << setting.optparse_args
     }
@@ -133,7 +159,7 @@ class Puppet::Settings
     options
   end
 
-  # Is our parameter a boolean parameter?
+  # Is our setting a boolean setting?
   def boolean?(param)
     param = param.to_sym
     @config.include?(param) and @config[param].kind_of?(BooleanSetting)
@@ -161,6 +187,7 @@ class Puppet::Settings
     end
 
     @value_sets[:memory] = Values.new(:memory, @config)
+    @value_sets[:overridden_defaults] = Values.new(:overridden_defaults, @config)
 
     @cache.clear
   end
@@ -365,6 +392,10 @@ class Puppet::Settings
       end
     end
 
+    if FULLY_DEPRECATED_SETTINGS.include?(str)
+      Puppet.deprecation_warning("Setting #{str} is deprecated. See http://links.puppetlabs.com/env-settings-deprecations", "setting-#{str}")
+    end
+
     @value_sets[:cli].set(str, value)
     unsafe_flush_cache
   end
@@ -405,7 +436,7 @@ class Puppet::Settings
           end
           puts "#{v} = #{value(v,env)}"
         else
-          puts "invalid parameter: #{v}"
+          puts "invalid setting: #{v}"
           return false
         end
       end
@@ -477,7 +508,7 @@ class Puppet::Settings
     mode
   end
 
-  # Return all of the parameters associated with a given section.
+  # Return all of the settings associated with a given section.
   def params(section = nil)
     if section
       section = section.intern if section.is_a? String
@@ -501,6 +532,8 @@ class Puppet::Settings
 
     # If we get here and don't have any data, we just return and don't muck with the current state of the world.
     return if data.nil?
+
+    issue_deprecations(data)
 
     # If we get here then we have some data, so we need to clear out any previous settings that may have come from
     #  config files.
@@ -617,10 +650,12 @@ class Puppet::Settings
       :string     => StringSetting,
       :file       => FileSetting,
       :directory  => DirectorySetting,
+      :file_or_directory => FileOrDirectorySetting,
       :path       => PathSetting,
       :boolean    => BooleanSetting,
       :terminus   => TerminusSetting,
       :duration   => DurationSetting,
+      :ttl        => TTLSetting,
       :enum       => EnumSetting,
       :priority   => PrioritySetting,
       :autosign   => AutosignSetting,
@@ -708,11 +743,7 @@ class Puppet::Settings
 
   # The order in which to search for values.
   def searchpath(environment = nil)
-    if environment
-      [:cli, :memory, environment, :run_mode, :main, :application_defaults]
-    else
-      [:cli, :memory, :run_mode, :main, :application_defaults]
-    end
+    [:memory, :cli, environment, :run_mode, :main, :application_defaults, :overridden_defaults].compact
   end
 
   # Get a list of objects per section
@@ -764,6 +795,7 @@ class Puppet::Settings
     Puppet.deprecation_warning("Puppet.settings.set_value is deprecated. Use Puppet[]= instead.")
     if @value_sets[type]
       @value_sets[type].set(param, value)
+      unsafe_flush_cache
     end
   end
 
@@ -811,11 +843,11 @@ class Puppet::Settings
       name = name.to_sym
       hash[:name] = name
       hash[:section] = section
-      raise ArgumentError, "Parameter #{name} is already defined" if @config.include?(name)
+      raise ArgumentError, "Setting #{name} is already defined" if @config.include?(name)
       tryconfig = newsetting(hash)
       if short = tryconfig.short
         if other = @shortnames[short]
-          raise ArgumentError, "Parameter #{other.name} is already using short name '#{short}'"
+          raise ArgumentError, "Setting #{other.name} is already using short name '#{short}'"
         end
         @shortnames[short] = tryconfig
       end
@@ -842,7 +874,7 @@ class Puppet::Settings
   def to_catalog(*sections)
     sections = nil if sections.empty?
 
-    catalog = Puppet::Resource::Catalog.new("Settings")
+    catalog = Puppet::Resource::Catalog.new("Settings", Puppet::Node::Environment::NONE)
 
     @config.keys.find_all { |key| @config[key].is_a?(FileSetting) }.each do |key|
       file = @config[key]
@@ -856,6 +888,7 @@ class Puppet::Settings
     end
 
     add_user_resources(catalog, sections)
+    add_environment_resources(catalog, sections)
 
     catalog
   end
@@ -863,7 +896,7 @@ class Puppet::Settings
   # Convert our list of config settings into a configuration file.
   def to_config
     str = %{The configuration file for #{Puppet.run_mode.name}.  Note that this file
-is likely to have unused configuration parameters in it; any parameter that's
+is likely to have unused settings in it; any setting that's
 valid anywhere in Puppet can be in any config file, even if it's not used.
 
 Every section can specify three special parameters: owner, group, and mode.
@@ -972,7 +1005,7 @@ Generated on #{Time.now}.
 
     setting = @config[param]
 
-    # Short circuit to nil for undefined parameters.
+    # Short circuit to nil for undefined settings.
     return nil if setting.nil?
 
     # Check the cache first.  It needs to be a per-environment
@@ -1011,8 +1044,36 @@ Generated on #{Time.now}.
     end
   end
 
+  # This method just turns a file into a new ConfigFile::Conf instance
+  # @param file [String] absolute path to the configuration file
+  # @return [Puppet::Settings::ConfigFile::Conf]
+  # @api private
+  def parse_file(file)
+    @config_file_parser.parse_file(file, read_file(file))
+  end
 
   private
+
+  DEPRECATED_ENVIRONMENT_SETTINGS = [:manifest, :modulepath, :config_version].freeze
+  FULLY_DEPRECATED_SETTINGS = [:templatedir, :manifestdir].freeze
+  DEPRECATED_SETTINGS = (DEPRECATED_ENVIRONMENT_SETTINGS + FULLY_DEPRECATED_SETTINGS).freeze
+
+  def issue_deprecations(data)
+    sections = data.sections.inject([]) do |accum,entry|
+      accum << entry[1] if [:main, :master, :agent, :user].include?(entry[0])
+      accum
+    end
+
+    sections.each do |section|
+      DEPRECATED_ENVIRONMENT_SETTINGS.each do |s|
+        Puppet.deprecation_warning("Setting #{s} is deprecated in puppet.conf. See http://links.puppetlabs.com/env-settings-deprecations", "puppet-conf-setting-#{s}") if !section.setting(s).nil?
+      end
+
+      FULLY_DEPRECATED_SETTINGS.each do |s|
+        Puppet.deprecation_warning("Setting #{s} is deprecated. See http://links.puppetlabs.com/env-settings-deprecations", "setting-#{s}") if !section.setting(s).nil?
+      end
+    end
+  end
 
   def get_config_file_default(default)
     obj = nil
@@ -1023,6 +1084,20 @@ Generated on #{Time.now}.
     raise ArgumentError, "Default #{default} is not a file" unless obj.is_a? FileSetting
 
     obj
+  end
+
+  def add_environment_resources(catalog, sections)
+    path = self[:environmentpath]
+    envdir = path.split(File::PATH_SEPARATOR).first if path
+    configured_environment = self[:environment]
+    if configured_environment == "production" && envdir && Puppet::FileSystem.exist?(envdir)
+      configured_environment_path = File.join(envdir, configured_environment)
+      catalog.add_resource(
+        Puppet::Resource.new(:file,
+                             configured_environment_path,
+                             :parameters => { :ensure => 'directory' })
+      )
+    end
   end
 
   def add_user_resources(catalog, sections)
@@ -1049,7 +1124,7 @@ Generated on #{Time.now}.
   def value_sets_for(environment, mode)
     searchpath(environment).collect do |name|
       case name
-      when :cli, :memory, :application_defaults
+      when :cli, :memory, :application_defaults, :overridden_defaults
         @value_sets[name]
       when :run_mode
         if @configuration_file
@@ -1065,28 +1140,18 @@ Generated on #{Time.now}.
             values_from_section = ValuesFromSection.new(name, section)
           end
         end
-        if values_from_section.nil? && @global_defaults_initialized
-          values_from_section = ValuesFromCurrentEnvironment.new(name)
+        if values_from_section.nil? && global_defaults_initialized?
+          values_from_section = ValuesFromEnvironmentConf.new(name)
         end
         values_from_section
       end
     end.compact
   end
 
-  # This method just turns a file in to a hash of hashes.
-  def parse_file(file)
-    @config_file_parser.parse_file(file, read_file(file))
-  end
-
   # Read the file in.
+  # @api private
   def read_file(file)
-    begin
-      return File.read(file)
-    rescue Errno::ENOENT
-      raise ArgumentError, "No such file #{file}", $!.backtrace
-    rescue Errno::EACCES
-      raise ArgumentError, "Permission denied to file #{file}", $!.backtrace
-    end
+    return Puppet::FileSystem.read(file)
   end
 
   # Private method for internal test use only; allows to do a comprehensive clear of all settings between tests.
@@ -1195,11 +1260,11 @@ Generated on #{Time.now}.
       return value unless value.is_a? String
       value.gsub(/\$(\w+)|\$\{(\w+)\}/) do |value|
         varname = $2 || $1
-        if varname == "environment"
+        if varname == "environment" && @environment
           @environment
         elsif varname == "run_mode"
           @mode
-        elsif pval = interpolate(varname.to_sym)
+        elsif !(pval = interpolate(varname.to_sym)).nil?
           pval
         else
           raise InterpolationError, "Could not find value for #{value}"
@@ -1222,7 +1287,7 @@ Generated on #{Time.now}.
     def set(name, value)
       if !@defaults[name]
         raise ArgumentError,
-          "Attempt to assign a value to unknown configuration parameter #{name.inspect}"
+          "Attempt to assign a value to unknown setting #{name.inspect}"
       end
 
       if @defaults[name].has_hook?
@@ -1256,38 +1321,30 @@ Generated on #{Time.now}.
   end
 
   # @api private
-  class ValuesFromCurrentEnvironment
-    def initialize(desired_environment)
-      @desired_environment = desired_environment
+  class ValuesFromEnvironmentConf
+    def initialize(environment_name)
+      @environment_name = environment_name
     end
 
     def include?(name)
-      return false unless name == :modulepath || name == :manifest
-      if i = instance
-        i.include?(name)
+      if Puppet::Settings::EnvironmentConf::VALID_SETTINGS.include?(name) && conf
+        return true
       end
+      false
     end
 
     def lookup(name)
-      return nil unless name == :modulepath || name == :manifest
-      if i = instance
-        i[name]
-      end
+      return nil unless Puppet::Settings::EnvironmentConf::VALID_SETTINGS.include?(name)
+      conf.send(name) if conf
     end
 
-    private
-
-    def instance
-      unless @instance
-        env = Puppet.lookup(:current_environment)
-        if env.name == @desired_environment
-          @instance = {
-            :modulepath => env.full_modulepath.join(File::PATH_SEPARATOR),
-            :manifest => env.manifest,
-          }
+    def conf
+      unless @conf
+        if environments = Puppet.lookup(:environments)
+          @conf = environments.get_conf(@environment_name)
         end
       end
-      return @instance
+      return @conf
     end
   end
 end

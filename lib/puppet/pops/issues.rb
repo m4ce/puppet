@@ -244,7 +244,7 @@ module Puppet::Pops::Issues
   end
 
   ILLEGAL_VAR_NAME = hard_issue :ILLEGAL_VAR_NAME, :name do
-    "Illegal variable name, The given name '#{name}' does not conform to the naming rule /^((::)?[a-z_]\w*)(::[a-z]\w*)*$/"
+    "Illegal variable name, The given name '#{name}' does not conform to the naming rule /^((::)?[a-z]\w*)*((::)?[a-z_]\w*)$/"
   end
 
   ILLEGAL_NUMERIC_VAR_NAME = hard_issue :ILLEGAL_NUMERIC_VAR_NAME, :name do
@@ -384,7 +384,7 @@ module Puppet::Pops::Issues
     base_type_label = base_type.is_a?(String) ? base_type : label.a_an_uc(base_type)
     if max == -1 || max == 1.0 / 0.0 # Infinity
       "#{base_type_label}[] accepts #{min} or more arguments. Got #{actual}"
-    elsif max
+    elsif max && max != min
       "#{base_type_label}[] accepts #{min} to #{max} arguments. Got #{actual}"
     else
       "#{base_type_label}[] accepts #{min} #{label.plural_s(min, 'argument')}. Got #{actual}"
@@ -403,6 +403,10 @@ module Puppet::Pops::Issues
     "First argument to Resource[] must be a resource type or a String. Got #{actual}."
   end
 
+  EMPTY_RESOURCE_SPECIALIZATION = issue :EMPTY_RESOURCE_SPECIALIZATION do
+    "Arguments to Resource[] are all empty/undefined"
+  end
+
   ILLEGAL_HOSTCLASS_NAME = hard_issue :ILLEGAL_HOSTCLASS_NAME, :name do
     "Illegal Class name in class reference. #{label.a_an_uc(name)} cannot be used where a String is expected"
   end
@@ -412,6 +416,10 @@ module Puppet::Pops::Issues
   #
   ILLEGAL_DEFINITION_NAME = hard_issue :ILLEGAL_DEFINTION_NAME, :name do
     "Unacceptable name. The name '#{name}' is unacceptable as the name of #{label.a_an(semantic)}"
+  end
+
+  NON_NAMESPACED_FUNCTION = hard_issue :NON_NAMESPACED_FUNCTION, :name do
+    "A Puppet Function must be defined within a module name-space. The name '#{name}' is unacceptable."
   end
 
   NOT_NUMERIC = issue :NOT_NUMERIC, :value do
@@ -448,5 +456,34 @@ module Puppet::Pops::Issues
 
   RESULT_IS_INFINITY = hard_issue :RESULT_IS_INFINITY, :operator do
     "The result of the #{operator} expression is Infinity"
+  end
+
+  # TODO_HEREDOC
+  EMPTY_HEREDOC_SYNTAX_SEGMENT = issue :EMPTY_HEREDOC_SYNTAX_SEGMENT, :syntax do
+    "Heredoc syntax specification has empty segment between '+' : '#{syntax}'"
+  end
+
+  ILLEGAL_EPP_PARAMETERS = issue :ILLEGAL_EPP_PARAMETERS do
+    "Ambiguous EPP parameter expression. Probably missing '<%-' before parameters to remove leading whitespace"
+  end
+
+  DISCONTINUED_IMPORT = hard_issue :DISCONTINUED_IMPORT do
+    "Use of 'import' has been discontinued in favor of a manifest directory. See http://links.puppetlabs.com/puppet-import-deprecation"
+  end
+
+  IDEM_EXPRESSION_NOT_LAST = issue :IDEM_EXPRESSION_NOT_LAST do
+    "This #{label.label(semantic)} is not productive. A non productive construct may only be placed last in a block/sequence"
+  end
+
+  IDEM_NOT_ALLOWED_LAST = hard_issue :IDEM_NOT_ALLOWED_LAST, :container do
+    "This #{label.label(semantic)} is not productive. #{label.a_an_uc(container)} can not end with a non productive construct"
+  end
+
+  RESERVED_WORD = hard_issue :RESERWED_WORD, :word do
+    "Use of reserved word: #{word}, must be quoted if intended to be a String value"
+  end
+
+  UNMATCHED_SELECTOR = hard_issue :UNMATCHED_SELECTOR, :param_value do
+    "No matching entry for selector parameter with value '#{param_value}'"
   end
 end

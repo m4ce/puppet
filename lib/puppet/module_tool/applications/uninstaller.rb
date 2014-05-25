@@ -22,6 +22,7 @@ module Puppet::ModuleTool
         begin
           find_installed_module
           validate_module
+
           FileUtils.rm_rf(@installed.first.path, :secure => true)
 
           results[:affected_modules] = @installed
@@ -87,7 +88,12 @@ module Puppet::ModuleTool
         mod = @installed.first
 
         if !@options[:force] && mod.has_metadata?
-          changes = Puppet::ModuleTool::Applications::Checksummer.run(mod.path)
+          changes = begin
+            Puppet::ModuleTool::Applications::Checksummer.run(mod.path)
+          rescue ArgumentError
+            []
+          end
+
           if !changes.empty?
             raise LocalChangesError,
               :action            => :uninstall,

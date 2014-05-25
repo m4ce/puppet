@@ -11,12 +11,15 @@ class Puppet::Agent
 
   attr_reader :client_class, :client, :splayed, :should_fork
 
-  # Just so we can specify that we are "the" instance.
   def initialize(client_class, should_fork=true)
     @splayed = false
 
-    @should_fork = should_fork
+    @should_fork = can_fork? && should_fork
     @client_class = client_class
+  end
+
+  def can_fork?
+    Puppet.features.posix? && RUBY_PLATFORM != 'java'
   end
 
   def needing_restart?

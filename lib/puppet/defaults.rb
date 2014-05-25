@@ -52,6 +52,22 @@ module Puppet
         :owner    => "service",
         :group    => "service",
         :desc     => "The directory in which to store log files",
+    },
+    :log_level => {
+      :default    => 'notice',
+      :type       => :enum,
+      :values     => ["debug","info","notice","warning","err","alert","emerg","crit"],
+      :desc       => "Default logging level for messages from Puppet. Allowed values are:
+
+        * debug
+        * info
+        * notice
+        * warning
+        * err
+        * alert
+        * emerg
+        * crit
+        ",
     }
   )
 
@@ -197,8 +213,14 @@ module Puppet
           this provides the default environment for nodes we know nothing about."
     },
     :environmentpath => {
-      :default => "$confdir/environments",
-      :desc    => "A path of environment directories",
+      :default => "",
+      :desc    => "A search path for directory environments, as a list of directories
+        separated by the system path separator character. (The POSIX path separator
+        is ':', and the Windows path separator is ';'.)
+
+        This setting must have a value set to enable **directory environments.** The
+        recommended value is `$confdir/environments`. For more details, see
+        http://docs.puppetlabs.com/puppet/latest/reference/environments.html",
       :type    => :path,
     },
     :diff_args => {
@@ -343,6 +365,14 @@ module Puppet
       configuration files.  This timeout determines how quickly Puppet checks whether
       a file (such as manifests or templates) has changed on disk. #{AS_DURATION}",
     },
+    :environment_timeout => {
+      :default    => "5s",
+      :type       => :ttl,
+      :desc       => "The time to live for a cached environment.
+      #{AS_DURATION}
+      This setting can also be set to `unlimited`, which causes the environment to
+      be cached until the master is restarted."
+    },
     :queue_type => {
       :default    => "stomp",
       :desc       => "Which type of queue to use for asynchronous processing.",
@@ -364,11 +394,11 @@ module Puppet
         :hook     => proc do |value|
           if value
             # This reconfigures the termini for Node, Facts, and Catalog
-            Puppet.settings[:storeconfigs] = true
+            Puppet.settings.override_default(:storeconfigs, true)
 
             # But then we modify the configuration
             Puppet::Resource::Catalog.indirection.cache_class = :queue
-            Puppet.settings[:catalog_cache_terminus] = :queue
+            Puppet.settings.override_default(:catalog_cache_terminus, :queue)
           else
             raise "Cannot disable asynchronous storeconfigs in a running process"
           end
@@ -383,7 +413,7 @@ module Puppet
     `active_record` backend, but will disable external tools that search the storeconfigs database.
     Thinning catalogs is generally unnecessary when using PuppetDB to store catalogs.",
       :hook     => proc do |value|
-        Puppet.settings[:storeconfigs] = true if value
+        Puppet.settings.override_default(:storeconfigs, true) if value
         end
       },
     :config_version => {
@@ -391,7 +421,11 @@ module Puppet
       :desc       => "How to determine the configuration version.  By default, it will be the
       time that the configuration is parsed, but you can provide a shell script to override how the
       version is determined.  The output of this script will be added to every log message in the
-      reports, allowing you to correlate changes on your hosts to the source version on the server.",
+      reports, allowing you to correlate changes on your hosts to the source version on the server.
+
+      Setting a global value for config_version in puppet.conf is deprecated. Please set a
+      per-environment value in environment.conf instead. For more info, see
+      http://docs.puppetlabs.com/puppet/latest/reference/environments.html",
     },
     :zlib => {
         :default  => true,
@@ -427,11 +461,16 @@ module Puppet
       :type    => :boolean,
       :desc    => "Stores trusted node data in a hash called $trusted.
         When true also prevents $trusted from being overridden in any scope.",
+    },
+    :immutable_node_data => {
+      :default => '$trusted_node_data',
+      :type    => :boolean,
+      :desc    => "When true, also prevents $trusted and $facts from being overridden in any scope",
     }
   )
   Puppet.define_settings(:module_tool,
     :module_repository  => {
-      :default  => 'https://forge.puppetlabs.com',
+      :default  => 'https://forgeapi.puppetlabs.com',
       :desc     => "The module repository",
     },
     :module_working_dir => {
@@ -450,8 +489,29 @@ module Puppet
     # We have to downcase the fqdn, because the current ssl stuff (as oppsed to in master) doesn't have good facilities for
     # manipulating naming.
     :certname => {
-      :default => Puppet::Settings.default_certname.downcase, :desc => "The name to use when handling certificates.  Defaults
-      to the fully qualified domain name.",
+      :default => Puppet::Settings.default_certname.downcase, :desc => "The name to use when handling certificates. When a node
+        requests a certificate from the CA puppet master, it uses the value of the
+        `certname` setting as its requested Subject CN.
+
+        This is the name used when managing a node's permissions in
+        [auth.conf](http://docs.puppetlabs.com/puppet/latest/reference/config_file_auth.html).
+        In most cases, it is also used as the node's name when matching
+        [node definitions](http://docs.puppetlabs.com/puppet/latest/reference/lang_node_definitions.html)
+        and requesting data from an ENC. (This can be changed with the `node_name_value`
+        and `node_name_fact` settings, although you should only do so if you have
+        a compelling reason.)
+
+        A node's certname is available in Puppet manifests as `$trusted['certname']`. (See
+        [Facts and Built-In Variables](http://docs.puppetlabs.com/puppet/latest/reference/lang_facts_and_builtin_vars.html)
+        for more details.)
+
+        * For best compatibility, you should limit the value of `certname` to
+          only use letters, numbers, periods, underscores, and dashes. (That is,
+          it should match `/\A[a-z0-9._-]+\Z/`.)
+        * The special value `ca` is reserved, and can't be used as the certname
+          for a normal node.
+
+        Defaults to the node's fully qualified domain name.",
       :call_hook => :on_define_and_write, # Call our hook with the default value, so we're always downcased
       :hook => proc { |value| raise(ArgumentError, "Certificate names must be lower case; see #1168") unless value == value.downcase }},
     :certdnsnames => {
@@ -674,6 +734,13 @@ EOT
       :type     => :duration,
       :desc     => "The window of time leading up to a certificate's expiration that a notification
         will be logged. This applies to CA, master, and agent certificates. #{AS_DURATION}"
+    },
+    :digest_algorithm => {
+        :default  => 'md5',
+        :type     => :enum,
+        :values => ["md5", "sha256"],
+        :desc     => 'Which digest algorithm to use for file resources and the filebucket.
+                      Valid values are md5, sha256. Default is md5.',
     }
   )
 
@@ -861,13 +928,22 @@ EOT
     :manifestdir => {
       :default    => "$confdir/manifests",
       :type       => :directory,
-      :desc       => "Where puppet master looks for its manifests.",
+      :desc       => "Used to build the default value of the `manifest` setting. Has no other purpose.
+
+        This setting is deprecated."
     },
     :manifest => {
       :default    => "$manifestdir/site.pp",
-      :type       => :file,
-      :desc       => "The entry-point manifest file for puppet master or a directory of manifests
-        to be evaluated in alphabetical order.",
+      :type       => :file_or_directory,
+      :desc       => "The entry-point manifest for puppet master. This can be one file
+        or a directory of manifests to be evaluated in alphabetical order. Puppet manages
+        this path as a directory if one exists or if the path ends with a / or \\.
+
+        Setting a global value for `manifest` in puppet.conf is deprecated. Please use
+        directory environments instead. If you need to use something other than the
+        environment's `manifests` directory as the main manifest, you can set
+        `manifest` in environment.conf. For more info, see
+        http://docs.puppetlabs.com/puppet/latest/reference/environments.html",
     },
     :code => {
       :default    => "",
@@ -931,15 +1007,30 @@ EOT
     :basemodulepath => {
       :default => "$confdir/modules#{File::PATH_SEPARATOR}/usr/share/puppet/modules",
       :type => :path,
-      :desc => "The base non-environment specific search path for modules, included
-      also in all directory environment and default legacy environment modulepaths.",
+      :desc => "The search path for **global** modules. Should be specified as a
+        list of directories separated by the system path separator character. (The
+        POSIX path separator is ':', and the Windows path separator is ';'.)
+
+        If you are using directory environments, these are the modules that will
+        be used by _all_ environments. Note that the `modules` directory of the active
+        environment will have priority over any global directories. For more info, see
+        http://docs.puppetlabs.com/puppet/latest/reference/environments.html
+
+        This setting also provides the default value for the deprecated `modulepath`
+        setting, which is used when directory environments are disabled.",
     },
     :modulepath => {
       :default => "$basemodulepath",
       :type => :path,
       :desc => "The search path for modules, as a list of directories separated by the system
         path separator character. (The POSIX path separator is ':', and the
-        Windows path separator is ';'.)",
+        Windows path separator is ';'.)
+
+        Setting a global value for `modulepath` in puppet.conf is deprecated. Please use
+        directory environments instead. If you need to use something other than the
+        default modulepath of `<ACTIVE ENVIRONMENT'S MODULES DIR>:$basemodulepath`,
+        you can set `modulepath` in environment.conf. For more info, see
+        http://docs.puppetlabs.com/puppet/latest/reference/environments.html",
     },
     :ssl_client_header => {
       :default    => "HTTP_X_CLIENT_DN",
@@ -1221,7 +1312,7 @@ EOT
       :hook => proc { |value|
         if value
           Puppet.deprecation_warning "Setting 'catalog_format' is deprecated; use 'preferred_serialization_format' instead."
-          Puppet.settings[:preferred_serialization_format] = value
+          Puppet.settings.override_default(:preferred_serialization_format, value)
         end
       }
     },
@@ -1743,7 +1834,7 @@ EOT
         if value
           if not Puppet.settings[:async_storeconfigs]
             Puppet::Resource::Catalog.indirection.cache_class = :store_configs
-            Puppet.settings[:catalog_cache_terminus] = :store_configs
+            Puppet.settings.override_default(:catalog_cache_terminus, :store_configs)
           end
           Puppet::Node::Facts.indirection.cache_class = :store_configs
 
@@ -1765,7 +1856,9 @@ EOT
         :default  => "$vardir/templates",
         :type     => :directory,
         :desc     => "Where Puppet looks for template files.  Can be a list of colon-separated
-          directories.",
+          directories.
+
+          This setting is deprecated. Please put your templates in modules instead."
     },
 
     :allow_variables_with_dashes => {
@@ -1826,6 +1919,23 @@ EOT
         Available Since Puppet 3.5.
       EOT
     },
+   :biff => {
+     :default => false,
+     :type => :boolean,
+     :hook => proc do |value|
+       if Puppet.settings[:parser] != 'future'
+         Puppet.settings.override_default(:parser, 'future')
+       end
+       if Puppet.settings[:evaluator] != 'future'
+         Puppet.settings.override_default(:evaluator, 'future')
+       end
+     end,
+     :desc => <<-EOT
+       Turns on Biff the catalog builder, future parser, and future evaluator.
+       This is an experimental feature - and this setting may go away before
+       release of Pupet 3.6.
+     EOT
+   },
    :max_errors => {
      :default => 10,
      :desc => <<-'EOT'

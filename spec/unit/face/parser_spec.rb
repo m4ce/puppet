@@ -14,9 +14,12 @@ describe Puppet::Face[:parser, :current] do
     end
 
     it "validates the configured site manifest when no files are given" do
-      Puppet[:manifest] = file_containing('site.pp', "{ invalid =>")
+      manifest = file_containing('site.pp', "{ invalid =>")
 
-      expect { parser.validate() }.to exit_with(1)
+      configured_environment = Puppet::Node::Environment.create(:default, [], manifest)
+      Puppet.override(:current_environment => configured_environment) do
+        expect { parser.validate() }.to exit_with(1)
+      end
     end
 
     it "validates the given file" do
@@ -40,11 +43,9 @@ describe Puppet::Face[:parser, :current] do
     it "parses supplied manifest files in the context of a directory environment" do
       manifest = file_containing('test.pp', "{ invalid =>")
 
-      env_loader = Puppet::Environments::Static.new(
-        Puppet::Node::Environment.create(:special, [], '')
-      )
-      Puppet.override(:environments => env_loader) do
-        Puppet[:environment] = 'special'
+      env = Puppet::Node::Environment.create(:special, [])
+      env_loader = Puppet::Environments::Static.new(env)
+      Puppet.override({:environments => env_loader, :current_environment => env}) do
         expect { parser.validate(manifest) }.to exit_with(1)
       end
 
@@ -56,7 +57,9 @@ describe Puppet::Face[:parser, :current] do
   it "validates the contents of STDIN when no files given and STDIN is not a tty" do
     from_a_piped_input_of("{ invalid =>")
 
-    expect { parser.validate() }.to exit_with(1)
+    Puppet.override(:current_environment => Puppet::Node::Environment.create(:special, [])) do
+      expect { parser.validate() }.to exit_with(1)
+    end
   end
 
   def from_an_interactive_terminal

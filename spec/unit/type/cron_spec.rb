@@ -3,13 +3,17 @@
 require 'spec_helper'
 
 describe Puppet::Type.type(:cron), :unless => Puppet.features.microsoft_windows? do
-  before :all do
+  let(:simple_provider) do
     @provider_class = described_class.provide(:simple) { mk_resource_methods }
     @provider_class.stubs(:suitable?).returns true
+    @provider_class
+  end
+
+  before :each do
     described_class.stubs(:defaultprovider).returns @provider_class
   end
 
-  after :all do
+  after :each do
     described_class.unprovide(:simple)
   end
 
@@ -524,11 +528,6 @@ describe Puppet::Type.type(:cron), :unless => Puppet.features.microsoft_windows?
       req[0].target.must == @resource
       req[0].source.must == @user_alice
     end
-  end
-
-  it "should require a command when adding an entry" do
-    entry = described_class.new(:name => "test_entry", :ensure => :present)
-    expect { entry.value(:command) }.to raise_error(Puppet::Error, /No command/)
   end
 
   it "should not require a command when removing an entry" do

@@ -2,9 +2,13 @@ Puppet::Type.type(:package).provide :apt, :parent => :dpkg, :source => :dpkg do
   # Provide sorting functionality
   include Puppet::Util::Package
 
-  desc "Package management via `apt-get`."
+  desc "Package management via `apt-get`.
 
-  has_feature :versionable
+    This provider supports the `install_options` attribute, which allows command-line flags to be passed to apt-get.
+    These options should be specified as a string (e.g. '--flag'), a hash (e.g. {'--flag' => 'value'}),
+    or an array where each element is either a string or a hash."
+
+  has_feature :versionable, :install_options
 
   commands :aptget => "/usr/bin/apt-get"
   commands :aptcache => "/usr/bin/apt-cache"
@@ -63,6 +67,7 @@ Puppet::Type.type(:package).provide :apt, :parent => :dpkg, :source => :dpkg do
       cmd << "--force-yes"
     end
 
+    cmd += install_options if @resource[:install_options]
     cmd << :install << str
 
     aptget(*cmd)
@@ -103,5 +108,9 @@ Puppet::Type.type(:package).provide :apt, :parent => :dpkg, :source => :dpkg do
     aptget '-y', '-q', :remove, '--purge', @resource[:name]
     # workaround a "bug" in apt, that already removed packages are not purged
     super
+  end
+
+  def install_options
+    join_options(@resource[:install_options])
   end
 end

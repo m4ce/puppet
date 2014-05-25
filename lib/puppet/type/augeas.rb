@@ -13,6 +13,8 @@
 #   See the License for the specific language governing permissions and
 #   limitations under the License.
 
+require 'puppet/parameter/boolean'
+
 Puppet::Type.newtype(:augeas) do
   include Puppet::Util
 
@@ -83,7 +85,7 @@ Puppet::Type.newtype(:augeas) do
       where:
 
       * `AUGEAS_PATH` is a valid path scoped by the context
-      * `MATCH_PATH` is a valid match synatx scoped by the context
+      * `MATCH_PATH` is a valid match syntax scoped by the context
       * `COMPARATOR` is one of `>, >=, !=, ==, <=,` or `<`
       * `STRING` is a string
       * `INT` is a number
@@ -153,6 +155,16 @@ Puppet::Type.newtype(:augeas) do
     has_lens = !self[:lens].nil?
     has_incl = !self[:incl].nil?
     self.fail "You must specify both the lens and incl parameters, or neither." if has_lens != has_incl
+  end
+
+  newparam(:show_diff, :boolean => true, :parent => Puppet::Parameter::Boolean) do
+    desc "Whether to display differences when the file changes, defaulting to
+        true.  This parameter is useful for files that may contain passwords or
+        other secret data, which might otherwise be included in Puppet reports or
+        other insecure outputs.  If the global `show_diff` setting
+        is false, then no diffs will be shown even if this parameter is true."
+
+    defaultto :true
   end
 
   # This is the actual meat of the code. It forces

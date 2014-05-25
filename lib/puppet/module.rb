@@ -28,11 +28,12 @@ class Puppet::Module
   # of +path+, return +nil+
   def self.find(modname, environment = nil)
     return nil unless modname
-    env = Puppet.lookup(:environments).get(environment || Puppet[:environment])
+    # Unless a specific environment is given, use the current environment
+    env = environment ? Puppet.lookup(:environments).get(environment) : Puppet.lookup(:current_environment)
     env.module(modname)
   end
 
-  attr_reader :name, :environment, :path
+  attr_reader :name, :environment, :path, :metadata
   attr_writer :environment
 
   attr_accessor :dependencies, :forge_name
@@ -113,7 +114,7 @@ class Puppet::Module
   end
 
   def load_metadata
-    data = JSON.parse File.read(metadata_file)
+    @metadata = data = JSON.parse(File.read(metadata_file))
     @forge_name = data['name'].gsub('-', '/') if data['name']
 
     [:source, :author, :version, :license, :puppetversion, :dependencies].each do |attr|
